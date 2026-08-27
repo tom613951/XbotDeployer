@@ -32,8 +32,16 @@ class ContactsDB:
 
     def __init__(self, db_path: Optional[str] = None):
         if not db_path:
-            # 默认保存在当前模块上一级目录的 data 或同级
-            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            import sys
+            if getattr(sys, 'frozen', False):
+                # Nuitka 编译后的单文件环境或 PyInstaller环境
+                base_dir = os.path.dirname(sys.argv[0])
+            elif '__compiled__' in globals():
+                # Nuitka 编译环境
+                base_dir = os.path.dirname(sys.argv[0])
+            else:
+                # 源码环境
+                base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             db_path = os.path.join(base_dir, "contacts.db")
 
         self.db_path = db_path

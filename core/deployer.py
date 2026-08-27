@@ -77,20 +77,20 @@ class ShadowBotDeployer:
             with open(file_path, "rb") as f:
                 file_bytes = f.read()
 
-            headers = {
-                "Content-Type": "application/octet-stream"
-            }
+            headers = {}
 
             # OSS 通常使用 PUT 请求
             resp = self.session.put(upload_url, headers=headers, data=file_bytes, timeout=60)
             if resp.status_code in [200, 201, 204]:
                 return True, "云端文件上传成功"
 
-            # PUT 失败，尝试 POST
+            # PUT 失败，尝试 POST (通常不应该运行到这里，OSS严格校验方法)
             resp_post = self.session.post(upload_url, headers=headers, data=file_bytes, timeout=60)
             if resp_post.status_code in [200, 201, 204]:
                 return True, "云端文件上传成功"
-            return False, f"上传失败 (PUT {resp.status_code} / POST {resp_post.status_code}): {resp_post.text}"
+            
+            # 如果双双失败，主要打印 PUT 的错误（因为OSS签名的肯定是PUT）
+            return False, f"上传失败 (PUT {resp.status_code}): {resp.text}"
         except Exception as e:
             return False, f"上传应用包网络异常: {e}"
 
