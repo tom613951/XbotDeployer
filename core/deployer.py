@@ -112,27 +112,32 @@ class ShadowBotDeployer:
         }
 
         payload = {
-            "appName": pkg_data.get("name", "未命名应用"),
-            "description": pkg_data.get("description") or "",
-            "appIcon": pkg_data.get("icon") or "",
-            "uiaType": pkg_data.get("uia_type", "PC"),
-            "packageCode": package_code,
+            "appId": pkg_data.get("uuid") or "",
             "packageMd5": package_md5,
-            "instruction": pkg_data.get("instruction") or "",
-            "internalDependencies": pkg_data.get("internaldependencies") or [],
-            "externalDependencies": pkg_data.get("external_dependencies") or [],
-            "ipaasDependencies": pkg_data.get("ipaasDependencies") or [],
-            "customItems": pkg_data.get("customItems") or {},
-            "videoUrl": pkg_data.get("videoUrl") or "",
-            "gifUrl": pkg_data.get("gifUrl") or "",
-            "imageUrl": pkg_data.get("imageUrl") or "",
-            "imageName": pkg_data.get("imageName") or "",
-            "appFlowParamList": pkg_data.get("appFlowParamList") or [],
-            "statistics": pkg_data.get("statistics") or {},
-            "elementLibraryCodes": pkg_data.get("elementLibraryCodes") or [],
-            "elementLibraryStatus": pkg_data.get("elementLibraryStatus") or 0,
-            "groupId": pkg_data.get("groupId") or None,
-            "enableViewSource": pkg_data.get("enableViewSource", True)
+            "appPackage": {
+                "packageCode": package_code,
+                "name": pkg_data.get("name") or "未命名应用",
+                "appName": pkg_data.get("name") or "未命名应用",
+                "appIcon": pkg_data.get("icon") or "robot",
+                "icon": pkg_data.get("icon") or "robot",
+                "description": pkg_data.get("description") or "",
+                "uiaType": pkg_data.get("uia_type", "PC"),
+                "instruction": pkg_data.get("instruction") or "",
+                "internalDependencies": pkg_data.get("internaldependencies") or [],
+                "externalDependencies": pkg_data.get("external_dependencies") or [],
+                "ipaasDependencies": pkg_data.get("ipaasDependencies") or [],
+                "customItems": pkg_data.get("customItems") or {},
+                "videoUrl": pkg_data.get("videoUrl") or "",
+                "gifUrl": pkg_data.get("gifUrl") or "",
+                "imageUrl": pkg_data.get("imageUrl") or "",
+                "imageName": pkg_data.get("imageName") or "",
+                "appFlowParamList": pkg_data.get("appFlowParamList") or [],
+                "statistics": pkg_data.get("statistics") or {},
+                "elementLibraryCodes": pkg_data.get("elementLibraryCodes") or [],
+                "elementLibraryStatus": pkg_data.get("elementLibraryStatus") or 0,
+                "groupId": pkg_data.get("groupId") or None,
+                "enableViewSource": pkg_data.get("enableViewSource", True)
+            }
         }
 
         try:
@@ -178,14 +183,17 @@ class ShadowBotDeployer:
             log("🌐 正在向影刀云端申请云存储资源...")
             ok, msg, res_data = self.assign_upload_url(
                 target_token=target_token,
-                version=pkg_data.get("version", 1)
+                app_type="xbot_robot",
+                version=pkg_data.get("version", "1.0.0"),
+                is_bot=pkg_data.get("isBot", 1)
             )
             if not ok:
                 log(f"❌ {msg}")
                 return False, msg
 
-            upload_url = res_data.get("uploadUrl")
-            file_key_md5 = res_data.get("fileKeyMd5") or res_data.get("uploadKey") or pkg_md5
+            upload_res = res_data
+            upload_url = upload_res.get("uploadUrl")
+            file_key = res_data.get("fileKey") or res_data.get("uploadKey") or pkg_md5
             if not upload_url:
                 err = "❌ 云存储返回信息缺少 uploadUrl"
                 log(err)
@@ -205,7 +213,7 @@ class ShadowBotDeployer:
             ok, msg, create_res = self.create_develop_app(
                 target_token=target_token,
                 pkg_data=pkg_data,
-                package_code=file_key_md5,
+                package_code=file_key,
                 package_md5=pkg_md5
             )
             if not ok:
