@@ -111,33 +111,21 @@ class ShadowBotDeployer:
             "Xybot-Client-RequestId": str(uuid.uuid4())
         }
 
+        app_package = pkg_data.copy()
+        app_package["packageCode"] = package_code
+        app_package["packageMd5"] = package_md5
+        # 确保 name/appName 等关键字段在第一层也能被识别
+        if not app_package.get("appName"):
+            app_package["appName"] = pkg_data.get("name")
+        if not app_package.get("appIcon"):
+            app_package["appIcon"] = pkg_data.get("icon") or "robot"
+        if not app_package.get("icon"):
+            app_package["icon"] = "robot"
+
         payload = {
             "appId": pkg_data.get("uuid") or "",
             "packageMd5": package_md5,
-            "appPackage": {
-                "packageCode": package_code,
-                "name": pkg_data.get("name") or "未命名应用",
-                "appName": pkg_data.get("name") or "未命名应用",
-                "appIcon": pkg_data.get("icon") or "robot",
-                "icon": pkg_data.get("icon") or "robot",
-                "description": pkg_data.get("description") or "",
-                "uiaType": pkg_data.get("uia_type", "PC"),
-                "instruction": pkg_data.get("instruction") or "",
-                "internalDependencies": pkg_data.get("internaldependencies") or [],
-                "externalDependencies": pkg_data.get("external_dependencies") or [],
-                "ipaasDependencies": pkg_data.get("ipaasDependencies") or [],
-                "customItems": pkg_data.get("customItems") or {},
-                "videoUrl": pkg_data.get("videoUrl") or "",
-                "gifUrl": pkg_data.get("gifUrl") or "",
-                "imageUrl": pkg_data.get("imageUrl") or "",
-                "imageName": pkg_data.get("imageName") or "",
-                "appFlowParamList": pkg_data.get("appFlowParamList") or [],
-                "statistics": pkg_data.get("statistics") or {},
-                "elementLibraryCodes": pkg_data.get("elementLibraryCodes") or [],
-                "elementLibraryStatus": pkg_data.get("elementLibraryStatus") or 0,
-                "groupId": pkg_data.get("groupId") or None,
-                "enableViewSource": pkg_data.get("enableViewSource", True)
-            }
+            "appPackage": app_package
         }
 
         try:

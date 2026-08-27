@@ -15,13 +15,16 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QPixmap, QIcon
 
 from core.scanner import scan_local_apps, get_shadowbot_users, get_default_shadowbot_dir
 from core.auth import login_shadowbot
 from core.deployer import ShadowBotDeployer
 from core.packager import build_app_package
 from core.contacts import ContactsDB
-from .contacts_dialog import ContactsManagerDialog
+from gui.contacts_dialog import ContactsManagerDialog
+from gui.icon import ICON_B64
+import base64
 
 
 class MigrationWorker(QThread):
@@ -96,7 +99,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("影刀应用一键迁移与部署工具 (纯净开源版)")
         self.resize(1100, 750)
-        self.setMinimumSize(950, 600)
+        
+        pixmap = QPixmap()
+        pixmap.loadFromData(base64.b64decode(ICON_B64))
+        self.setWindowIcon(QIcon(pixmap))
 
         self.db = ContactsDB()
         self.deployer = ShadowBotDeployer()
@@ -178,7 +184,7 @@ class MainWindow(QMainWindow):
         # 左侧底部操作栏
         btn_row_left = QHBoxLayout()
         btn_select_all = QPushButton("全选")
-        btn_select_all.clicked.connect(self.table_apps.selectAll)
+        btn_select_all.clicked.connect(self._select_all)
         btn_row_left.addWidget(btn_select_all)
 
         btn_invert = QPushButton("反选")
@@ -354,6 +360,9 @@ class MainWindow(QMainWindow):
         for r_idx, app in enumerate(self.filtered_apps):
             self.table_apps.insertRow(r_idx)
             item_name = QTableWidgetItem(app["name"])
+            item_name.setFlags(item_name.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item_name.setCheckState(Qt.CheckState.Unchecked)
+
             item_time = QTableWidgetItem(app["mtime_str"])
             item_size = QTableWidgetItem(app["size_str"])
             item_flows = QTableWidgetItem(str(app["flow_count"]))
@@ -372,13 +381,20 @@ class MainWindow(QMainWindow):
 
         self.lbl_app_summary.setText(f"共 {len(self.filtered_apps)} / {len(self.all_apps)} 个应用")
 
+    def _select_all(self):
+        for r in range(self.table_apps.rowCount()):
+            item = self.table_apps.item(r, 0)
+            if item:
+                item.setCheckState(Qt.CheckState.Checked)
+
     def _invert_selection(self):
-        total_rows = self.table_apps.rowCount()
-        selected = set(idx.row() for idx in self.table_apps.selectedIndexes())
-        self.table_apps.clearSelection()
-        for r in range(total_rows):
-            if r not in selected:
-                self.table_apps.selectRow(r)
+        for r in range(self.table_apps.rowCount()):
+            item = self.table_apps.item(r, 0)
+            if item:
+                if item.checkState() == Qt.CheckState.Checked:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+                else:
+                    item.setCheckState(Qt.CheckState.Checked)
 
     def _on_app_double_click(self, index):
         row = index.row()
@@ -422,9 +438,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _export_selected_to_zip(self):
-        selected_rows = list(set([idx.row() for idx in self.table_apps.selectedIndexes()]))
+        selected_rows = []
+        for r in range(self.table_apps.rowCount()):
+            item = self.table_apps.item(r, 0)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                selected_rows.append(r)
         if not selected_rows:
-            QMessageBox.warning(self, "提示", "请先在列表中选中要导出的应用！")
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要导出的应用！")
             return
 
         target_dir = QFileDialog.getExistingDirectory(self, "选择导出 Zip 保存目录")
@@ -485,9 +505,13 @@ class MainWindow(QMainWindow):
             self.log(f"❌ 清理缓存失败: {e}", "ERROR")
 
     def _start_migration(self):
-        selected_rows = list(set([idx.row() for idx in self.table_apps.selectedIndexes()]))
+        selected_rows = []
+        for r in range(self.table_apps.rowCount()):
+            item = self.table_apps.item(r, 0)
+            if item and item.checkState() == Qt.CheckState.Checked:
+                selected_rows.append(r)
         if not selected_rows:
-            QMessageBox.warning(self, "提示", "请先在列表中选中要迁移的应用！")
+            QMessageBox.warning(self, "提示", "请先在列表中勾选要迁移的应用！")
             return
 
         target_username = self.ent_target_user.text().strip()
