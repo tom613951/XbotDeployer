@@ -131,7 +131,7 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(self.cmb_users)
 
         btn_refresh = QPushButton("🔄 刷新应用列表")
-        btn_refresh.clicked.connect(self._reload_apps)
+        btn_refresh.clicked.connect(self._on_refresh_clicked)
         top_bar.addWidget(btn_refresh)
 
         btn_clean = QPushButton("🧹 清理临时缓存")
@@ -316,18 +316,34 @@ class MainWindow(QMainWindow):
         self.txt_log.insertHtml(html)
         self.txt_log.ensureCursorVisible()
 
-    def _load_users_and_apps(self):
+    def _on_refresh_clicked(self):
+        self.log("🔄 正在重新扫描用户与应用列表...")
+        self._load_users_and_apps(preserve_selection=True)
+
+    def _load_users_and_apps(self, preserve_selection: bool = False):
+        current_uid = None
+        if preserve_selection and hasattr(self, "users_data") and self.cmb_users.currentIndex() >= 0:
+            if self.cmb_users.currentIndex() < len(self.users_data):
+                current_uid = self.users_data[self.cmb_users.currentIndex()]["user_id"]
+
         users = get_shadowbot_users()
         if not users:
             self.log("⚠️ 未在默认路径检测到 ShadowBot 用户数据目录", "WARN")
+            self.cmb_users.blockSignals(True)
+            self.cmb_users.clear()
             self.cmb_users.addItem("未检测到用户")
+            self.cmb_users.blockSignals(False)
             return
 
         self.users_data = users
         self.cmb_users.blockSignals(True)
         self.cmb_users.clear()
-        for u in users:
+        selected_idx = 0
+        for idx, u in enumerate(users):
             self.cmb_users.addItem(f"{u['user_id']} ({u['app_count']}个应用)")
+            if current_uid and u["user_id"] == current_uid:
+                selected_idx = idx
+        self.cmb_users.setCurrentIndex(selected_idx)
         self.cmb_users.blockSignals(False)
 
         self._reload_apps()
@@ -340,6 +356,11 @@ class MainWindow(QMainWindow):
         if idx >= 0 and hasattr(self, "users_data") and idx < len(self.users_data):
             selected_user = self.users_data[idx]
             self.all_apps = scan_local_apps(user_path=selected_user["path"])
+            # 同步更新当前下拉项的显示数量，确保完全一致
+            selected_user["app_count"] = len(self.all_apps)
+            self.cmb_users.blockSignals(True)
+            self.cmb_users.setItemText(idx, f"{selected_user['user_id']} ({len(self.all_apps)}个应用)")
+            self.cmb_users.blockSignals(False)
         else:
             self.all_apps = scan_local_apps()
 
