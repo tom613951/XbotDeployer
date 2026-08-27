@@ -28,7 +28,8 @@ def get_shadowbot_users(shadowbot_dir: Optional[str] = None) -> List[Dict[str, A
     users = []
     for item in os.listdir(users_dir):
         upath = os.path.join(users_dir, item)
-        if os.path.isdir(upath) and item != "Assistant":
+        # 排除非用户文件夹（如 Assistant、git-repo 等内部缓存目录）
+        if os.path.isdir(upath) and item not in ["Assistant", "git-repo"] and item.isdigit():
             apps_dir = os.path.join(upath, "apps")
             app_count = 0
             if os.path.exists(apps_dir):

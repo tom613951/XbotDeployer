@@ -97,7 +97,7 @@ class MigrationWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("影刀应用一键迁移与部署工具 (纯净开源版)")
+        self.setWindowTitle("XbotDeployer")
         self.resize(1100, 750)
         
         pixmap = QPixmap()
