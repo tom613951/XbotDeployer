@@ -22,9 +22,10 @@ class ShadowBotDeployer:
     def assign_upload_url(
         self,
         target_token: str,
-        version: int = 1,
+        app_id: str = "",
+        version: int = 0,
         app_type: str = "app",
-        is_bot: bool = False
+        is_bot: bool = True
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
         请求分配云存储资源与上传签名 URL
@@ -32,10 +33,11 @@ class ShadowBotDeployer:
         url = f"{self.api_base_url}/api/client/app/file/assignUploadUrl"
         headers = {
             "Authorization": f"bearer {target_token}",
-            "Content-Type": "application/json; charset=utf-8"
+            "Content-Type": "application/json; charset=utf-8",
+            "Xybot-Client-RequestId": str(uuid.uuid4())
         }
         payload = {
-            "appId": "",
+            "appId": app_id,
             "appType": app_type,
             "version": version,
             "isBot": is_bot
@@ -84,12 +86,11 @@ class ShadowBotDeployer:
             if resp.status_code in [200, 201, 204]:
                 return True, "云端文件上传成功"
 
-            # PUT 失败，尝试 POST (通常不应该运行到这里，OSS严格校验方法)
+            # PUT 失败，尝试 POST
             resp_post = self.session.post(upload_url, headers=headers, data=file_bytes, timeout=60)
             if resp_post.status_code in [200, 201, 204]:
                 return True, "云端文件上传成功"
             
-            # 如果双双失败，主要打印 PUT 的错误（因为OSS签名的肯定是PUT）
             return False, f"上传失败 (PUT {resp.status_code}): {resp.text}"
         except Exception as e:
             return False, f"上传应用包网络异常: {e}"
@@ -108,37 +109,43 @@ class ShadowBotDeployer:
         headers = {
             "Authorization": f"bearer {target_token}",
             "Content-Type": "application/json; charset=utf-8",
-            "Xybot-Client-RequestId": str(uuid.uuid4())
+            "Xybot-Client-RequestId": "57214437-d52d-4f1f-a23f-87c3e9b84adb"
         }
 
-        app_package = pkg_data.copy()
-        app_package["packageCode"] = package_code
-        app_package["packageMd5"] = package_md5
-        # 转换驼峰命名
-        if "appName" not in app_package:
-            app_package["appName"] = pkg_data.get("name")
-        if "appIcon" not in app_package:
-            app_package["appIcon"] = pkg_data.get("icon") or "robot"
-        if "icon" not in app_package or not app_package["icon"]:
-            app_package["icon"] = "robot"
-            
-        if "feature_list" in app_package:
-            app_package["featureList"] = app_package.pop("feature_list")
-        if "robot_type" in app_package:
-            app_package["robotType"] = app_package.pop("robot_type")
-        if "uia_type" in app_package:
-            app_package["uiaType"] = app_package.pop("uia_type")
-        if "external_dependencies" in app_package:
-            app_package["externalDependencies"] = app_package.pop("external_dependencies")
-        if "internaldependencies" in app_package:
-            app_package["internalDependencies"] = app_package.pop("internaldependencies")
-        if "package_version" in app_package:
-            app_package["packageVersion"] = app_package.pop("package_version")
+        stats = pkg_data.get("statistics") or {}
+        app_package = {
+            "activities": pkg_data.get("activities", []),
+            "appFlowParamList": pkg_data.get("appFlowParamList", []),
+            "appIcon": pkg_data.get("icon") or "robot",
+            "appType": "app",
+            "blockCount": int(stats.get("blockCount", 0)),
+            "description": pkg_data.get("description", ""),
+            "elementLibraryCodes": pkg_data.get("elementLibraryCodes", []),
+            "enableViewSource": False,
+            "externalDependencies": pkg_data.get("external_dependencies", []),
+            "flowCount": int(stats.get("flowCount", 0)),
+            "gifUrl": "",
+            "imageName": "",
+            "imageUrl": "",
+            "instruction": pkg_data.get("instruction", ""),
+            "internalDependencies": pkg_data.get("internaldependencies", []),
+            "internalautodependencies": pkg_data.get("internalautodependencies", []),
+            "ipaasDependencies": pkg_data.get("ipaasDependencies", []),
+            "magicBlockCount": int(stats.get("magicBlockCount", 0)),
+            "name": pkg_data.get("name"),
+            "packageCode": package_code,
+            "sourceLineCount": int(stats.get("sourceLineCount", 0)),
+            "statistics": stats,
+            "uiaType": "PC",
+            "videoUrl": ""
+        }
 
         payload = {
             "appId": pkg_data.get("uuid") or "",
-            "packageMd5": package_md5,
-            "appPackage": app_package
+            "appPackage": app_package,
+            "elementLibraryStatus": 0,
+            "groupId": "",
+            "packageMd5": package_md5
         }
 
         try:
@@ -146,6 +153,28 @@ class ShadowBotDeployer:
             if resp.status_code == 200:
                 res_data = resp.json()
                 if res_data.get("code") == 200 or res_data.get("success") is True:
+                    # 校验云端开发权限与应用状态
+                    app_id = pkg_data.get("uuid")
+                    detail_url = f"{self.api_base_url}/api/client/app/develop/app/detail?appId={app_id}&checkAppRecycle=True"
+                    detail_resp = self.session.get(detail_url, headers=headers, timeout=15)
+                    if detail_resp.status_code == 200:
+                        det_data = detail_resp.json()
+                        if det_data.get("code") != 200 and det_data.get("success") is not True:
+                            msg = det_data.get("msg") or "未取得该应用的操作权限"
+                            return False, f"创建应用校验失败: {msg}", det_data
+                    
+                    # 提交激活应用开发时间戳
+                    time_url = f"{self.api_base_url}/api/client/app/developInfo/developTime/save"
+                    time_payload = {
+                        "appId": app_id,
+                        "startTime": "2024-12-23 16:45:12",
+                        "endTime": "2024-12-23 16:46:46"
+                    }
+                    try:
+                        self.session.post(time_url, headers=headers, json=time_payload, timeout=15)
+                    except Exception:
+                        pass
+
                     return True, "接收方账号应用同步创建成功", res_data.get("data")
                 else:
                     msg = res_data.get("msg") or res_data.get("message") or str(res_data)
@@ -184,9 +213,10 @@ class ShadowBotDeployer:
             log("🌐 正在向影刀云端申请云存储资源...")
             ok, msg, res_data = self.assign_upload_url(
                 target_token=target_token,
-                app_type="xbot_robot",
-                version=pkg_data.get("version", "1.0.0"),
-                is_bot=pkg_data.get("isBot", 1)
+                app_id=pkg_data.get("uuid", ""),
+                version=0,
+                app_type="app",
+                is_bot=True
             )
             if not ok:
                 log(f"❌ {msg}")

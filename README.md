@@ -41,5 +41,5 @@ options:
 您可以使用 Nuitka 将此应用编译为独立的单文件可执行程序：
 
 ```bash
-python -m nuitka --standalone --onefile --enable-plugin=pyqt6 --windows-console-mode=attach --include-package-data=chardet --output-filename="XbotDeployer.exe" --output-dir="build_out" --remove-output main.py
+python -m nuitka --standalone --onefile --enable-plugin=pyqt6 --windows-console-mode=attach --include-package-data=chardet --include-package-data=chardet.models --include-package-data="chardet:*.bin" --output-filename="XbotDeployer.exe" --output-dir="build_out" --remove-output main.py
 ```
