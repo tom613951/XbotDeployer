@@ -153,27 +153,19 @@ class ShadowBotDeployer:
             if resp.status_code == 200:
                 res_data = resp.json()
                 if res_data.get("code") == 200 or res_data.get("success") is True:
-                    # 校验云端开发权限与应用状态
-                    app_id = pkg_data.get("uuid")
-                    detail_url = f"{self.api_base_url}/api/client/app/develop/app/detail?appId={app_id}&checkAppRecycle=True"
-                    detail_resp = self.session.get(detail_url, headers=headers, timeout=15)
-                    if detail_resp.status_code == 200:
-                        det_data = detail_resp.json()
-                        if det_data.get("code") != 200 and det_data.get("success") is not True:
-                            msg = det_data.get("msg") or "未取得该应用的操作权限"
-                            return False, f"创建应用校验失败: {msg}", det_data
-                    
                     # 提交激活应用开发时间戳
-                    time_url = f"{self.api_base_url}/api/client/app/developInfo/developTime/save"
-                    time_payload = {
-                        "appId": app_id,
-                        "startTime": "2024-12-23 16:45:12",
-                        "endTime": "2024-12-23 16:46:46"
-                    }
-                    try:
-                        self.session.post(time_url, headers=headers, json=time_payload, timeout=15)
-                    except Exception:
-                        pass
+                    app_id = pkg_data.get("uuid")
+                    if app_id:
+                        time_url = f"{self.api_base_url}/api/client/app/developInfo/developTime/save"
+                        time_payload = {
+                            "appId": app_id,
+                            "startTime": "2024-12-23 16:45:12",
+                            "endTime": "2024-12-23 16:46:46"
+                        }
+                        try:
+                            self.session.post(time_url, headers=headers, json=time_payload, timeout=15)
+                        except Exception:
+                            pass
 
                     return True, "接收方账号应用同步创建成功", res_data.get("data")
                 else:
