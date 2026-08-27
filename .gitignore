@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# build artifacts
+build_out/
+XbotDeployer.exe
+build.bat
+
+# databases
+contacts.db
+
+# virtual environments
+venv/
+.env
+
+# IDEs
+.vscode/
+.idea/
