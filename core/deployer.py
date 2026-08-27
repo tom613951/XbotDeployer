@@ -216,7 +216,7 @@ class ShadowBotDeployer:
 
             upload_res = res_data
             upload_url = upload_res.get("uploadUrl")
-            file_key = res_data.get("fileKey") or res_data.get("uploadKey") or pkg_md5
+            file_key = res_data.get("fileKeyMd5") or res_data.get("fileKey") or pkg_md5
             if not upload_url:
                 err = "❌ 云存储返回信息缺少 uploadUrl"
                 log(err)
