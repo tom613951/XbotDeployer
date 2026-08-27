@@ -114,13 +114,26 @@ class ShadowBotDeployer:
         app_package = pkg_data.copy()
         app_package["packageCode"] = package_code
         app_package["packageMd5"] = package_md5
-        # 确保 name/appName 等关键字段在第一层也能被识别
-        if not app_package.get("appName"):
+        # 转换驼峰命名
+        if "appName" not in app_package:
             app_package["appName"] = pkg_data.get("name")
-        if not app_package.get("appIcon"):
+        if "appIcon" not in app_package:
             app_package["appIcon"] = pkg_data.get("icon") or "robot"
-        if not app_package.get("icon"):
+        if "icon" not in app_package or not app_package["icon"]:
             app_package["icon"] = "robot"
+            
+        if "feature_list" in app_package:
+            app_package["featureList"] = app_package.pop("feature_list")
+        if "robot_type" in app_package:
+            app_package["robotType"] = app_package.pop("robot_type")
+        if "uia_type" in app_package:
+            app_package["uiaType"] = app_package.pop("uia_type")
+        if "external_dependencies" in app_package:
+            app_package["externalDependencies"] = app_package.pop("external_dependencies")
+        if "internaldependencies" in app_package:
+            app_package["internalDependencies"] = app_package.pop("internaldependencies")
+        if "package_version" in app_package:
+            app_package["packageVersion"] = app_package.pop("package_version")
 
         payload = {
             "appId": pkg_data.get("uuid") or "",
