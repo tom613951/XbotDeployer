@@ -29,17 +29,19 @@ def compile_py_to_pyc(src_py: str, dst_pyc: str) -> bool:
 def build_app_package(
     robot_dir: str,
     new_app_name: Optional[str] = None,
+    new_uuid: Optional[str] = None,
     encrypt_python: bool = False,
     output_dir: Optional[str] = None
-) -> Tuple[str, str, Dict[str, Any]]:
+) -> Tuple[str, str, Dict[str, Any], str]:
     """
-    打包影刀应用为标准 xbot_robot.zip 结构
+    打包影刀应用为标准 package.bot 结构并生成 package.json
 
     :param robot_dir: 原始应用的 xbot_robot 目录
     :param new_app_name: 迁移后的新应用名称 (若为空则保持原名)
+    :param new_uuid: 迁移后的新应用 UUID (若为空则生成全新 UUID)
     :param encrypt_python: 是否将 Python 代码编译为字节码以保护源码
     :param output_dir: zip 文件输出路径 (若为空则使用临时目录)
-    :return: (zip_file_path, package_md5, updated_package_json)
+    :return: (zip_file_path, package_md5, updated_package_json, pkg_file_path)
     """
     if not os.path.exists(robot_dir):
         raise FileNotFoundError(f"应用目录不存在: {robot_dir}")
@@ -71,6 +73,11 @@ def build_app_package(
         if new_app_name:
             pkg_data["name"] = new_app_name
 
+        if new_uuid:
+            pkg_data["uuid"] = new_uuid
+
+        pkg_data["version"] = "1"
+
         if encrypt_python:
             pkg_data["encrypt_bot"] = True
 
@@ -94,9 +101,13 @@ def build_app_package(
             out_target_dir = output_dir
             os.makedirs(out_target_dir, exist_ok=True)
 
-        zip_path = os.path.join(out_target_dir, "xbot_robot.zip")
+        zip_path = os.path.join(out_target_dir, "package.bot")
         if os.path.exists(zip_path):
             os.remove(zip_path)
+
+        out_json_path = os.path.join(out_target_dir, "package.json")
+        with open(out_json_path, "w", encoding="utf-8") as f:
+            json.dump(pkg_data, f, ensure_ascii=False, indent=2)
 
         # 打包 stage_dir 内的所有内容 (顶层即为 package.json、main.py 等)
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -109,7 +120,7 @@ def build_app_package(
         # 计算 MD5
         pkg_md5 = calculate_md5(zip_path)
 
-        return zip_path, pkg_md5, pkg_data
+        return zip_path, pkg_md5, pkg_data, out_json_path
 
     finally:
         # 清理中间构建临时目录

@@ -31,20 +31,12 @@ def get_shadowbot_users(shadowbot_dir: Optional[str] = None) -> List[Dict[str, A
         # 排除非用户文件夹（如 Assistant、git-repo 等内部缓存目录）
         if os.path.isdir(upath) and item not in ["Assistant", "git-repo"] and item.isdigit():
             apps_dir = os.path.join(upath, "apps")
-            app_count = 0
-            if os.path.exists(apps_dir):
-                for d in os.listdir(apps_dir):
-                    app_sub = os.path.join(apps_dir, d)
-                    if os.path.isdir(app_sub) and not d.endswith("_temp"):
-                        pkg1 = os.path.join(app_sub, "xbot_robot", "package.json")
-                        pkg2 = os.path.join(app_sub, "package.json")
-                        if os.path.exists(pkg1) or os.path.exists(pkg2):
-                            app_count += 1
+            scanned_apps = scan_local_apps(user_path=upath, shadowbot_dir=shadowbot_dir)
             users.append({
                 "user_id": item,
                 "path": upath,
                 "apps_path": apps_dir,
-                "app_count": app_count
+                "app_count": len(scanned_apps)
             })
     return users
 

@@ -55,7 +55,7 @@ def run_cli():
 
         print(f"📦 正在打包应用 [{target['name']}]...")
         try:
-            zip_path, md5_val, _ = build_app_package(
+            zip_path, md5_val, _, _ = build_app_package(
                 robot_dir=target["robot_dir"],
                 encrypt_python=args.encrypt,
                 output_dir=args.out

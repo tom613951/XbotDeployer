@@ -485,7 +485,7 @@ class MainWindow(QMainWindow):
             out_name = f"{safe_name}_{app['uuid'][:8]}.zip"
             out_path = os.path.join(target_dir, out_name)
             try:
-                zip_p, md5_val, _ = build_app_package(
+                zip_p, md5_val, _, _ = build_app_package(
                     robot_dir=app["robot_dir"],
                     encrypt_python=encrypt_py,
                     output_dir=target_dir

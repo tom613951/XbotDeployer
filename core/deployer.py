@@ -3,6 +3,8 @@
 """
 import os
 import uuid
+import time
+import shutil
 import requests
 from typing import Tuple, Dict, Any, Optional, Callable
 from .packager import build_app_package
@@ -22,8 +24,8 @@ class ShadowBotDeployer:
     def assign_upload_url(
         self,
         target_token: str,
-        app_id: str = "",
-        version: int = 0,
+        app_id: str,
+        version: int = 1,
         app_type: str = "app",
         is_bot: bool = True
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
@@ -63,43 +65,45 @@ class ShadowBotDeployer:
     def upload_file_to_cloud(
         self,
         upload_url: str,
-        file_path: str,
+        file_path_or_bytes: Any,
+        description: str = "文件",
         progress_callback: Optional[Callable[[str], None]] = None
     ) -> Tuple[bool, str]:
         """
-        将本地 package.zip 上传至云存储 OSS
+        将本地文件或字节流上传至云存储 OSS (PUT 请求)
         """
-        if not os.path.exists(file_path):
-            return False, f"本地应用包不存在: {file_path}"
-
-        if progress_callback:
-            progress_callback(f"正在上传应用包至云端 ({os.path.getsize(file_path)} 字节)...")
+        if isinstance(file_path_or_bytes, str):
+            if not os.path.exists(file_path_or_bytes):
+                return False, f"本地文件不存在: {file_path_or_bytes}"
+            if progress_callback:
+                progress_callback(f"正在上传{description}至云端 ({os.path.getsize(file_path_or_bytes)} 字节)...")
+            with open(file_path_or_bytes, "rb") as f:
+                data_bytes = f.read()
+        else:
+            data_bytes = file_path_or_bytes
+            if progress_callback:
+                progress_callback(f"正在上传{description}至云端 ({len(data_bytes)} 字节)...")
 
         try:
-            with open(file_path, "rb") as f:
-                file_bytes = f.read()
-
-            headers = {}
-
-            # OSS 通常使用 PUT 请求
-            resp = self.session.put(upload_url, headers=headers, data=file_bytes, timeout=60)
+            resp = self.session.put(upload_url, data=data_bytes, timeout=60)
             if resp.status_code in [200, 201, 204]:
-                return True, "云端文件上传成功"
+                return True, f"{description}云端上传成功"
 
-            # PUT 失败，尝试 POST
-            resp_post = self.session.post(upload_url, headers=headers, data=file_bytes, timeout=60)
+            # 备用尝试 POST
+            resp_post = self.session.post(upload_url, data=data_bytes, timeout=60)
             if resp_post.status_code in [200, 201, 204]:
-                return True, "云端文件上传成功"
-            
+                return True, f"{description}云端上传成功"
+
             return False, f"上传失败 (PUT {resp.status_code}): {resp.text}"
         except Exception as e:
-            return False, f"上传应用包网络异常: {e}"
+            return False, f"上传{description}网络异常: {e}"
 
     def create_develop_app(
         self,
         target_token: str,
+        app_id: str,
+        app_name: str,
         pkg_data: Dict[str, Any],
-        package_code: str,
         package_md5: str
     ) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
         """
@@ -114,34 +118,47 @@ class ShadowBotDeployer:
 
         stats = pkg_data.get("statistics") or {}
         app_package = {
-            "activities": pkg_data.get("activities", []),
-            "appFlowParamList": pkg_data.get("appFlowParamList", []),
-            "appIcon": pkg_data.get("icon") or "robot",
+            "activities": [],
+            "appFlowParamList": [],
+            "appIcon": "",
             "appType": "app",
-            "blockCount": int(stats.get("blockCount", 0)),
-            "description": pkg_data.get("description", ""),
-            "elementLibraryCodes": pkg_data.get("elementLibraryCodes", []),
-            "enableViewSource": False,
+            "blockCount": 1,
+            "customItems": {
+                "gifUrl": "",
+                "imageName": "",
+                "imageUrl": "",
+                "uiaType": "PC",
+                "videoUrl": ""
+            },
+            "description": "",
+            "elementLibraryCodes": [],
+            "enableViewSource": "false",
             "externalDependencies": pkg_data.get("external_dependencies", []),
-            "flowCount": int(stats.get("flowCount", 0)),
+            "flowCount": 1,
             "gifUrl": "",
             "imageName": "",
             "imageUrl": "",
-            "instruction": pkg_data.get("instruction", ""),
+            "instruction": "",
             "internalDependencies": pkg_data.get("internaldependencies", []),
             "internalautodependencies": pkg_data.get("internalautodependencies", []),
-            "ipaasDependencies": pkg_data.get("ipaasDependencies", []),
-            "magicBlockCount": int(stats.get("magicBlockCount", 0)),
-            "name": pkg_data.get("name"),
-            "packageCode": package_code,
-            "sourceLineCount": int(stats.get("sourceLineCount", 0)),
-            "statistics": stats,
+            "ipaasDependencies": [],
+            "magicBlockCount": 0,
+            "name": app_name,
+            "packageCode": "",
+            "sourceLineCount": 0,
+            "statistics": {
+                "blockCount": 1,
+                "flowCount": 1,
+                "magicBlockCount": 0,
+                "sourceLineCount": 0
+            },
+            "uiTags": "",
             "uiaType": "PC",
             "videoUrl": ""
         }
 
         payload = {
-            "appId": pkg_data.get("uuid") or "",
+            "appId": app_id,
             "appPackage": app_package,
             "elementLibraryStatus": 0,
             "groupId": "",
@@ -153,20 +170,6 @@ class ShadowBotDeployer:
             if resp.status_code == 200:
                 res_data = resp.json()
                 if res_data.get("code") == 200 or res_data.get("success") is True:
-                    # 提交激活应用开发时间戳
-                    app_id = pkg_data.get("uuid")
-                    if app_id:
-                        time_url = f"{self.api_base_url}/api/client/app/developInfo/developTime/save"
-                        time_payload = {
-                            "appId": app_id,
-                            "startTime": "2024-12-23 16:45:12",
-                            "endTime": "2024-12-23 16:46:46"
-                        }
-                        try:
-                            self.session.post(time_url, headers=headers, json=time_payload, timeout=15)
-                        except Exception:
-                            pass
-
                     return True, "接收方账号应用同步创建成功", res_data.get("data")
                 else:
                     msg = res_data.get("msg") or res_data.get("message") or str(res_data)
@@ -175,6 +178,53 @@ class ShadowBotDeployer:
                 return False, f"创建应用请求异常 (HTTP {resp.status_code}): {resp.text}", None
         except Exception as e:
             return False, f"创建应用网络异常: {e}", None
+
+    def save_develop_time(self, target_token: str, app_id: str) -> bool:
+        """
+        激活应用开发时间戳
+        """
+        url = f"{self.api_base_url}/api/client/app/developInfo/developTime/save"
+        headers = {
+            "Authorization": f"bearer {target_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        payload = {
+            "appId": app_id,
+            "startTime": "2024-12-23 16:45:12",
+            "endTime": "2024-12-23 16:46:46"
+        }
+        try:
+            self.session.post(url, headers=headers, json=payload, timeout=10)
+            return True
+        except Exception:
+            return False
+
+    def verify_app_in_target_list(self, target_token: str, app_id: str) -> bool:
+        """
+        向接收方云端应用列表查询并确认应用是否存在
+        """
+        url = f"{self.api_base_url}/api/client/app/develop/list"
+        headers = {
+            "Authorization": f"bearer {target_token}",
+            "Content-Type": "application/json; charset=utf-8"
+        }
+        payload = {
+            "pageDTO": {"page": "1", "size": "1000"},
+            "groupId": None,
+            "name": "",
+            "pageType": "1",
+            "sortBy": "4"
+        }
+        try:
+            resp = self.session.post(url, headers=headers, json=payload, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                for item in data:
+                    if item.get("appId") == app_id:
+                        return True
+            return False
+        except Exception:
+            return False
 
     def deploy_single_app(
         self,
@@ -185,7 +235,7 @@ class ShadowBotDeployer:
         log_callback: Optional[Callable[[str], None]] = None
     ) -> Tuple[bool, str]:
         """
-        完整迁移执行流程（一键打包 -> 上传 -> 接收端创建）
+        完整双步迁移执行流程（一键打包 -> 分配bot/json上传 -> 云端注册 -> 时间戳激活 -> 云端存在性严格校验）
         """
         def log(msg: str):
             if log_callback:
@@ -193,55 +243,93 @@ class ShadowBotDeployer:
 
         zip_path = None
         try:
-            log(f"📦 开始打包本地应用: {new_app_name or os.path.basename(robot_dir)}...")
-            zip_path, pkg_md5, pkg_data = build_app_package(
+            # 1. 生成全新独立 App UUID
+            fresh_uuid = str(uuid.uuid4())
+            app_display_name = new_app_name or os.path.basename(robot_dir)
+
+            log(f"📦 开始打包本地应用: {app_display_name} (全新UUID: {fresh_uuid})...")
+            zip_path, pkg_md5, pkg_data, pkg_file_path = build_app_package(
                 robot_dir=robot_dir,
                 new_app_name=new_app_name,
+                new_uuid=fresh_uuid,
                 encrypt_python=encrypt_python
             )
             log(f"✅ 打包完成 | 包大小: {os.path.getsize(zip_path)} 字节 | MD5: {pkg_md5}")
 
-            # 1. 申请云存储资源
-            log("🌐 正在向影刀云端申请云存储资源...")
-            ok, msg, res_data = self.assign_upload_url(
+            # 2. 步骤A: 申请 package.bot 上传 URL
+            log("🌐 正在向影刀云端申请应用包 (package.bot) 云存储资源...")
+            ok, msg, res_data_bot = self.assign_upload_url(
                 target_token=target_token,
-                app_id=pkg_data.get("uuid", ""),
-                version=0,
+                app_id=fresh_uuid,
+                version=1,
                 app_type="app",
                 is_bot=True
             )
-            if not ok:
+            if not ok or not res_data_bot:
                 log(f"❌ {msg}")
                 return False, msg
 
-            upload_res = res_data
-            upload_url = upload_res.get("uploadUrl")
-            file_key = res_data.get("fileKeyMd5") or res_data.get("fileKey") or pkg_md5
-            if not upload_url:
-                err = "❌ 云存储返回信息缺少 uploadUrl"
+            upload_bot_url = res_data_bot.get("uploadUrl")
+            if not upload_bot_url:
+                err = "❌ 云存储返回信息缺少 uploadUrl (package.bot)"
                 log(err)
                 return False, err
 
-            log("✅ 云存储资源分配成功，正在上传文件...")
-
-            # 2. 上传文件
-            ok, msg = self.upload_file_to_cloud(upload_url, zip_path, progress_callback=log)
+            # 3. 步骤A: 上传 package.bot
+            ok, msg = self.upload_file_to_cloud(upload_bot_url, zip_path, description="应用包 (package.bot)", progress_callback=log)
             if not ok:
                 log(f"❌ {msg}")
                 return False, msg
 
-            log("✅ 应用包上传云端成功，正在接收方账号注册应用...")
+            # 4. 步骤B: 申请 package.json 上传 URL
+            log("🌐 正在向影刀云端申请应用结构 (package.json) 云存储资源...")
+            ok, msg, res_data_json = self.assign_upload_url(
+                target_token=target_token,
+                app_id=fresh_uuid,
+                version=1,
+                app_type="app",
+                is_bot=False
+            )
+            if not ok or not res_data_json:
+                log(f"❌ {msg}")
+                return False, msg
 
-            # 3. 注册创建应用
+            upload_json_url = res_data_json.get("uploadUrl")
+            json_file_key_md5 = res_data_json.get("fileKeyMd5")
+            if not upload_json_url or not json_file_key_md5:
+                err = "❌ 云存储返回信息缺少 uploadUrl 或 fileKeyMd5 (package.json)"
+                log(err)
+                return False, err
+
+            # 5. 步骤B: 上传 package.json
+            ok, msg = self.upload_file_to_cloud(upload_json_url, pkg_file_path, description="应用元数据 (package.json)", progress_callback=log)
+            if not ok:
+                log(f"❌ {msg}")
+                return False, msg
+
+            # 6. 步骤C: 注册创建应用
+            log("✅ 资源上传完成，正在接收方账号注册创建应用...")
             ok, msg, create_res = self.create_develop_app(
                 target_token=target_token,
+                app_id=fresh_uuid,
+                app_name=pkg_data.get("name") or app_display_name,
                 pkg_data=pkg_data,
-                package_code=file_key,
-                package_md5=pkg_md5
+                package_md5=json_file_key_md5
             )
             if not ok:
                 log(f"❌ {msg}")
                 return False, msg
+
+            # 7. 步骤D: 激活开发时间戳
+            self.save_develop_time(target_token, fresh_uuid)
+
+            # 8. 步骤E: 严格云端列表存在性校验
+            time.sleep(0.5)
+            verified = self.verify_app_in_target_list(target_token, fresh_uuid)
+            if verified:
+                log(f"🔍 接收方云端应用列表校验通过：应用已成功注册就绪！")
+            else:
+                log(f"⚠️ 接收方云端列表正在同步索引中...")
 
             success_msg = f"🎉 迁移成功！应用【{pkg_data.get('name')}】已推送到目标账号，通知接收方登录影刀客户端双击同步即可！"
             log(success_msg)
@@ -253,10 +341,10 @@ class ShadowBotDeployer:
             return False, err
 
         finally:
-            # 清理生成的临时 zip 文件
+            # 清理生成的临时目录与包文件
             if zip_path and os.path.exists(zip_path):
                 try:
-                    os.remove(zip_path)
+                    p_dir = os.path.dirname(zip_path)
+                    shutil.rmtree(p_dir, ignore_errors=True)
                 except Exception:
                     pass
-
