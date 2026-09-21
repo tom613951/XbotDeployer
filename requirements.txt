@@ -1,3 +1,0 @@
-PyQt6>=6.4.0
-requests>=2.28.0
-pycryptodome>=3.15.0

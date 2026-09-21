@@ -1,20 +1,22 @@
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
+## .NET Core
+[Bb]in/
+[Oo]bj/
+[Pp]ublish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
 
-# build artifacts
-build_out/
-XbotDeployer.exe
-build.bat
+# Build artifacts
+*.exe
+*.dll
+*.pdb
+*.nupkg
 
-# databases
+# Databases
 contacts.db
-
-# virtual environments
-venv/
-.env
 
 # IDEs
 .vscode/
 .idea/
+.vs/

@@ -1,0 +1,510 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Documents;
+using System.Windows.Media;
+using Microsoft.Win32;
+using Wpf.Ui.Appearance;
+using Wpf.Ui.Controls;
+using XbotDeployer.Core;
+
+namespace XbotDeployer;
+
+public partial class MainWindow : FluentWindow
+{
+    private readonly ContactsDb _contactsDb;
+    private readonly ShadowBotDeployer _deployer;
+
+    private List<ShadowBotUser> _users = [];
+    private List<ShadowBotApp> _allApps = [];
+    private List<ShadowBotApp> _filteredApps = [];
+    private List<ContactItem> _contacts = [];
+
+    private bool _isMigrating;
+    private bool _isScanning;
+    private bool _suppressUserChange;
+    private int _scanVersion;
+    private string? _currentUserDir;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        try
+        {
+            SystemThemeWatcher.Watch(this);
+        }
+        catch
+        {
+            // Theme watching is optional; a failure here must not block startup.
+        }
+
+        _contactsDb = new ContactsDb();
+        _deployer = new ShadowBotDeployer();
+
+        Loaded += MainWindow_Loaded;
+    }
+
+    private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        LoadUsersAndApps();
+        LoadContacts();
+    }
+
+    // ---------------------------------------------------------------- scanning
+
+    private async void LoadUsersAndApps()
+    {
+        LblAppSummary.Text = "正在扫描影刀账号...";
+
+        try
+        {
+            _users = await Task.Run(() => Scanner.GetShadowBotUsers());
+
+            _suppressUserChange = true;
+            CmbUsers.ItemsSource = null;
+            CmbUsers.ItemsSource = _users;
+
+            if (_users.Count == 0)
+            {
+                CmbUsers.SelectedIndex = -1;
+                _allApps = [];
+                _currentUserDir = null;
+                _suppressUserChange = false;
+                FilterApps();
+                LblAppSummary.Text = "未找到本地影刀账号";
+                AppendLog("[WARN] 未在默认路径检测到 ShadowBot 用户数据目录");
+                return;
+            }
+
+            CmbUsers.SelectedIndex = 0;
+            _suppressUserChange = false;
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[ERROR] 扫描影刀账号失败: {ex.Message}");
+            LblAppSummary.Text = "扫描影刀账号失败";
+            return;
+        }
+
+        await RefreshAppsAsync(_users[0].UserDir);
+    }
+
+    private void LoadContacts()
+    {
+        try
+        {
+            _contacts = _contactsDb.GetAll();
+            CmbContacts.ItemsSource = null;
+            CmbContacts.ItemsSource = _contacts;
+            CmbContacts.DisplayMemberPath = "Username";
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[ERROR] 读取常用联系人失败: {ex.Message}");
+        }
+    }
+
+    private void CmbUsers_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressUserChange) return;
+        if (CmbUsers.SelectedItem is ShadowBotUser user)
+        {
+            _ = RefreshAppsAsync(user.UserDir);
+        }
+    }
+
+    private async Task RefreshAppsAsync(string userDir)
+    {
+        // Ignore duplicate requests for the account already being scanned.
+        if (_isScanning && string.Equals(_currentUserDir, userDir, StringComparison.OrdinalIgnoreCase)) return;
+
+        var scanVersion = ++_scanVersion;
+        _currentUserDir = userDir;
+        _isScanning = true;
+        LblAppSummary.Text = "正在扫描本地应用...";
+
+        try
+        {
+            var apps = await Task.Run(() => Scanner.ScanLocalApps(userDir));
+            if (scanVersion != _scanVersion) return;
+
+            _allApps = apps;
+            FilterApps();
+            UpdateSelectedUserLabel(apps.Count);
+            AppendLog($"已扫描到 {apps.Count} 个本地应用");
+        }
+        catch (Exception ex)
+        {
+            if (scanVersion == _scanVersion)
+            {
+                _allApps = [];
+                FilterApps();
+                AppendLog($"[ERROR] 扫描本地应用失败: {ex.Message}");
+            }
+        }
+        finally
+        {
+            if (scanVersion == _scanVersion)
+            {
+                _isScanning = false;
+            }
+        }
+    }
+
+    private void UpdateSelectedUserLabel(int appCount)
+    {
+        if (CmbUsers.SelectedItem is ShadowBotUser current)
+        {
+            current.AppCount = appCount;
+        }
+    }
+
+    private void FilterApps()
+    {
+        var keyword = TxtSearch.Text?.Trim() ?? "";
+        var selected = _allApps.Where(a => a.IsSelected).Select(a => a.Uuid).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        _filteredApps = string.IsNullOrEmpty(keyword)
+            ? _allApps.ToList()
+            : _allApps.Where(a =>
+                a.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
+                a.Uuid.Contains(keyword, StringComparison.OrdinalIgnoreCase)).ToList();
+
+        foreach (var app in _filteredApps)
+        {
+            app.IsSelected = selected.Contains(app.Uuid);
+        }
+
+        GridApps.ItemsSource = null;
+        GridApps.ItemsSource = _filteredApps;
+
+        ChkSelectAllHeader.IsChecked = _filteredApps.Count > 0 && _filteredApps.All(a => a.IsSelected);
+        UpdateSummary();
+    }
+
+    private void UpdateSummary()
+    {
+        var selected = _allApps.Count(a => a.IsSelected);
+        LblAppSummary.Text = $"共 {_allApps.Count} 个应用（显示 {_filteredApps.Count} 个，已勾选 {selected} 个）";
+    }
+
+    private void TxtSearch_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        FilterApps();
+    }
+
+    private void BtnRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        if (CmbUsers.SelectedItem is ShadowBotUser user)
+        {
+            _ = RefreshAppsAsync(user.UserDir);
+        }
+    }
+
+    private void SetBusy(bool busy)
+    {
+        GridApps.IsEnabled = !busy;
+        BtnMigrate.IsEnabled = !busy;
+        CmbUsers.IsEnabled = !busy;
+    }
+
+    // -------------------------------------------------------------- selection
+
+    private void ChkSelectAllHeader_Click(object sender, RoutedEventArgs e)
+    {
+        var check = ChkSelectAllHeader.IsChecked == true;
+        foreach (var app in _filteredApps)
+        {
+            app.IsSelected = check;
+        }
+        UpdateSummary();
+    }
+
+    private void BtnSelectAll_Click(object sender, RoutedEventArgs e)
+    {
+        ChkSelectAllHeader.IsChecked = true;
+        ChkSelectAllHeader_Click(sender, e);
+    }
+
+    private void BtnInvertSelection_Click(object sender, RoutedEventArgs e)
+    {
+        foreach (var app in _filteredApps)
+        {
+            app.IsSelected = !app.IsSelected;
+        }
+        ChkSelectAllHeader.IsChecked = null;
+        UpdateSummary();
+    }
+
+    private List<ShadowBotApp> GetSelectedApps() => _allApps.Where(a => a.IsSelected).ToList();
+
+    private void GridApps_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (GridApps.SelectedItem is not ShadowBotApp app) return;
+
+        var detail = $"""
+            应用名称: {app.Name}
+            UUID: {app.Uuid}
+            版本: {app.Version}
+            流程数量: {app.FlowCount}
+            文件大小: {app.SizeStr}
+            修改时间: {app.MtimeStr}
+            本地路径: {app.RobotDir}
+            """;
+
+        Dialogs.Info(detail, "应用详情");
+    }
+
+    // ----------------------------------------------------------------- export
+
+    private async void BtnExportZip_Click(object sender, RoutedEventArgs e)
+    {
+        var selectedApps = GetSelectedApps();
+        if (selectedApps.Count == 0)
+        {
+            Dialogs.Warn("请先在列表中勾选要导出的应用。");
+            return;
+        }
+
+        var dialog = new OpenFolderDialog { Title = "选择导出 Zip 保存目录" };
+        if (dialog.ShowDialog() != true) return;
+
+        var exportDir = dialog.FolderName;
+        var encryptPy = ChkEncryptPython.IsChecked == true;
+
+        AppendLog($"开始导出 {selectedApps.Count} 个应用至: {exportDir}");
+
+        var success = 0;
+        await Task.Run(() =>
+        {
+            var invalidChars = Path.GetInvalidFileNameChars();
+            foreach (var app in selectedApps)
+            {
+                try
+                {
+                    Dispatcher.BeginInvoke(() => AppendLog($"[INFO] 正在打包: {app.Name} ({app.Uuid})..."));
+
+                    var cleanName = new string(app.Name.Where(c => !invalidChars.Contains(c)).ToArray()).Trim();
+                    if (string.IsNullOrEmpty(cleanName)) cleanName = "xbot_app";
+                    var shortUuid = app.Uuid.Length >= 8 ? app.Uuid[..8] : app.Uuid;
+                    var outName = $"{cleanName}_{shortUuid}.zip";
+                    var outPath = Path.Combine(exportDir, outName);
+
+                    var (zipPath, md5Val, _, jsonPath) = Packager.BuildAppPackage(
+                        robotDir: app.RobotDir,
+                        encryptPython: encryptPy
+                    );
+
+                    if (File.Exists(outPath)) File.Delete(outPath);
+                    File.Move(zipPath, outPath);
+
+                    // 清理伴生临时目录
+                    try
+                    {
+                        var tempDir = Path.GetDirectoryName(zipPath);
+                        if (!string.IsNullOrEmpty(tempDir) && Directory.Exists(tempDir))
+                        {
+                            Directory.Delete(tempDir, true);
+                        }
+                    }
+                    catch { }
+
+                    success++;
+                    Dispatcher.BeginInvoke(() => AppendLog($"[SUCCESS] 成功导出: {outName} (MD5: {md5Val})"));
+                }
+                catch (Exception ex)
+                {
+                    Dispatcher.BeginInvoke(() => AppendLog($"[ERROR] 导出 [{app.Name}] 失败: {ex.Message}"));
+                }
+            }
+        });
+
+        AppendLog($"[SUCCESS] 导出完成: 成功 {success}/{selectedApps.Count} 个。");
+        Dialogs.Info($"导出完成！成功导出 {success} 个应用包。", "完成");
+    }
+
+    // ---------------------------------------------------------------- contacts
+
+    private void CmbContacts_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (CmbContacts.SelectedItem is ContactItem contact)
+        {
+            TxtTargetUser.Text = contact.Username;
+            TxtTargetPassword.Password = contact.Password;
+        }
+    }
+
+    private void BtnManageContacts_Click(object sender, RoutedEventArgs e)
+    {
+        var window = new ContactsWindow(_contactsDb) { Owner = this };
+        window.ShowDialog();
+        LoadContacts();
+    }
+
+    // --------------------------------------------------------------- migration
+
+    private async void BtnMigrate_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isMigrating) return;
+
+        var selectedApps = GetSelectedApps();
+        if (selectedApps.Count == 0)
+        {
+            Dialogs.Warn("请先在列表中勾选要迁移的应用。");
+            return;
+        }
+
+        var username = TxtTargetUser.Text.Trim();
+        var password = TxtTargetPassword.Password;
+        if (string.IsNullOrEmpty(username) || string.IsNullOrEmpty(password))
+        {
+            Dialogs.Warn("请输入接收方影刀账号与密码。");
+            return;
+        }
+
+        if (ChkRememberContact.IsChecked == true)
+        {
+            _contactsDb.AddOrUpdate(username, password, "自动保存");
+            LoadContacts();
+        }
+
+        _isMigrating = true;
+        SetBusy(true);
+        ProgressBarMigration.Value = 0;
+        ProgressBarMigration.Maximum = selectedApps.Count;
+
+        var addSuffix = ChkAddSuffix.IsChecked == true;
+        var encryptPy = ChkEncryptPython.IsChecked == true;
+
+        try
+        {
+            AppendLog($"正在登录接收方账号 [{username}]...");
+
+            var (loginOk, loginMsg, tokenRes) = await AuthService.LoginShadowBotAsync(username, password);
+            if (!loginOk || tokenRes is null)
+            {
+                AppendLog($"[ERROR] 接收方账号登录失败: {loginMsg}");
+                Dialogs.Error($"接收方登录失败：\n{loginMsg}", "登录失败");
+                return;
+            }
+
+            var token = tokenRes.Value.TryGetProperty("access_token", out var tokenProp) ? tokenProp.GetString() ?? "" : "";
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                const string message = "登录响应中未包含 access_token。";
+                AppendLog($"[ERROR] {message}");
+                Dialogs.Error(message, "登录失败");
+                return;
+            }
+
+            var userUuid = tokenRes.Value.TryGetProperty("userUuid", out var uuidProp) ? uuidProp.GetString() ?? "未知" : "未知";
+            AppendLog($"[SUCCESS] 接收方账号登录成功 (UserUUID: {userUuid})");
+
+            var total = selectedApps.Count;
+            var successCount = 0;
+
+            for (var i = 0; i < total; i++)
+            {
+                var app = selectedApps[i];
+                var migratedName = addSuffix
+                    ? $"{app.Name}_云迁_接收于{DateTime.Now:yyyy年MM月dd日 HH时mm分ss秒}"
+                    : app.Name;
+
+                AppendLog($"--- 正在处理 [{i + 1}/{total}] {app.Name} ---");
+
+                var (ok, _) = await Task.Run(() => _deployer.DeploySingleAppAsync(
+                    targetToken: token,
+                    robotDir: app.RobotDir,
+                    newAppName: migratedName,
+                    encryptPython: encryptPy,
+                    logCallback: message => Dispatcher.BeginInvoke(() => AppendLog(message))
+                ));
+
+                if (ok) successCount++;
+                ProgressBarMigration.Value = i + 1;
+            }
+
+            var summary = $"迁移任务结束: 共 {total} 个应用，成功 {successCount} 个，失败 {total - successCount} 个";
+            AppendLog($"[SUCCESS] {summary}");
+            Dialogs.Info(summary, "任务完成");
+        }
+        finally
+        {
+            _isMigrating = false;
+            SetBusy(false);
+        }
+    }
+
+    // ------------------------------------------------------------------- misc
+
+    private void BtnCleanCache_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var count = 0;
+            long freed = 0;
+            foreach (var dir in Directory.GetDirectories(Path.GetTempPath(), "xbot_*"))
+            {
+                try
+                {
+                    foreach (var file in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
+                    {
+                        freed += new FileInfo(file).Length;
+                    }
+                    Directory.Delete(dir, true);
+                    count++;
+                }
+                catch
+                {
+                    // A locked directory is skipped and reported through the aggregate count.
+                }
+            }
+
+            var message = $"已清理 {count} 个缓存目录，释放约 {freed / 1024.0 / 1024.0:F2} MB";
+            AppendLog($"[SUCCESS] {message}");
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[ERROR] 清理临时缓存异常: {ex.Message}");
+        }
+    }
+
+    private void BtnClearLog_Click(object sender, RoutedEventArgs e)
+    {
+        RtfLog.Document.Blocks.Clear();
+    }
+
+    private void AppendLog(string message)
+    {
+        var brush = Brushes.LightGray;
+
+        if (message.Contains("[ERROR]"))
+        {
+            brush = new SolidColorBrush(Color.FromRgb(255, 99, 99));
+        }
+        else if (message.Contains("[SUCCESS]"))
+        {
+            brush = new SolidColorBrush(Color.FromRgb(92, 209, 96));
+        }
+        else if (message.Contains("[WARN]"))
+        {
+            brush = new SolidColorBrush(Color.FromRgb(240, 180, 60));
+        }
+        else if (message.Contains("[INFO]"))
+        {
+            brush = new SolidColorBrush(Color.FromRgb(90, 170, 255));
+        }
+
+        var paragraph = new Paragraph(new Run($"[{DateTime.Now:HH:mm:ss}] {message}") { Foreground = brush })
+        {
+            Margin = new Thickness(0, 1, 0, 1)
+        };
+
+        RtfLog.Document.Blocks.Add(paragraph);
+        RtfLog.ScrollToEnd();
+    }
+}
