@@ -409,15 +409,19 @@ public static class Scanner
     }
 
     /// <summary>
-    /// 删除应用并实时同步：标记影刀本地数据库 (user.db3) 回收状态、物理清理目录，并尝试同步云端回收
+    /// 删除应用并实时同步：优先通过影刀本地官方网关删除并上报云端、同步标记本地数据库回收状态，并彻底物理清理目录
     /// </summary>
     public static (bool Success, string Message) DeleteApp(string userDir, ShadowBotApp app)
     {
         try
         {
-            // 1. 同步影刀本地 SQLite 数据库 (user.db3)
-            // 影刀官方逻辑：将应用标记为回收站 (isRecycleBin = 1)，影刀主界面立即根据 isRecycleBin=0 隐藏，
-            // 且云同步时会上报回收状态，绝不会因为整行 DELETE 导致云端误判为“本地缺失”而自动复活。
+            // 1. 优先调用影刀客户端本地官方 API 网关 (ApiHttpServer，端口 42500~42505)
+            // 该网关由影刀客户端后台运行，调用其 recycle 与 delete 接口可直接驱动影刀主进程从界面、内存及云端空间彻底销毁该应用！
+            var gatewayOk = TryShadowBotGatewayDelete(app.Uuid, app.RobotType);
+
+            // 2. 同步更新影刀本地 SQLite 数据库 (user.db3)
+            // 影刀官方机理：将应用标记为回收站 (isRecycleBin = 1)，影刀主界面立即根据 isRecycleBin=0 隐藏，
+            // 且后续云同步时会上报回收状态，绝不会因为直接整行 DELETE 导致云端误判为“本地缺失”而重新复活下载。
             var dbPath = Path.Combine(userDir, "user.db3");
             if (File.Exists(dbPath))
             {
@@ -453,22 +457,68 @@ public static class Scanner
                 }
             }
 
-            // 2. 物理安全删除应用目录（消除只读属性，避免 Windows 权限拦截；若被锁定则移出扫描目录并异步清理）
+            // 3. 物理安全删除应用目录（消除只读属性，避免 Windows 权限拦截；若被锁定则移出扫描目录并异步清理）
             var targetDir = !string.IsNullOrEmpty(app.AppDir) && Directory.Exists(app.AppDir) ? app.AppDir : app.RobotDir;
             if (Directory.Exists(targetDir))
             {
                 SafeDeleteDirectory(targetDir);
             }
 
-            // 3. 尝试调用云端回收 API（若本地日志存在当前登录 token）
-            _ = Task.Run(() => TryCloudRecycleAppAsync(app.Uuid));
+            var tip = gatewayOk
+                ? "应用已通过影刀客户端网关与本地数据库成功删除，云端与本地已同步清除！"
+                : "应用已在影刀本地数据库与文件中彻底移除，已同步标记回收状态。";
 
-            return (true, "应用已成功删除并在影刀中同步移除。");
+            return (true, tip);
         }
         catch (Exception ex)
         {
             return (false, $"删除应用失败: {ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 调用影刀客户端内建官方 API 网关 (端口 42500..42505) 彻底删除应用 (包含移入回收站并永久销毁)
+    /// </summary>
+    private static bool TryShadowBotGatewayDelete(string appUuid, string robotType)
+    {
+        for (int port = 42500; port <= 42505; port++)
+        {
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(3) };
+
+                // 探测健康状态
+                var healthResp = client.GetAsync($"http://127.0.0.1:{port}/api/v1/health").GetAwaiter().GetResult();
+                if (!healthResp.IsSuccessStatusCode) continue;
+
+                var appType = string.Equals(robotType, "activity", StringComparison.OrdinalIgnoreCase) ? "activity" : "developed";
+
+                // 步骤 1: 移入回收站 (触发影刀主进程将应用移出主界面列表并上报云端回收)
+                var recycleUrl = $"http://127.0.0.1:{port}/api/v1/apps/{appUuid}/recycle";
+                using var recycleReq = new HttpRequestMessage(HttpMethod.Post, recycleUrl);
+                recycleReq.Content = new StringContent(
+                    JsonSerializer.Serialize(new { AppType = appType }),
+                    Encoding.UTF8,
+                    "application/json"
+                );
+                var recResp = client.SendAsync(recycleReq).GetAwaiter().GetResult();
+
+                // 步骤 2: 从回收站彻底永久销毁该应用 (从云端及影刀彻底删除)
+                var deleteUrl = $"http://127.0.0.1:{port}/api/v1/apps/recycle/{appUuid}";
+                using var delReq = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
+                var delResp = client.SendAsync(delReq).GetAwaiter().GetResult();
+
+                if (delResp.IsSuccessStatusCode || recResp.IsSuccessStatusCode)
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // 探测下一个端口
+            }
+        }
+        return false;
     }
 
     private static void SafeDeleteDirectory(string targetDir)
@@ -519,56 +569,6 @@ public static class Scanner
                 }
             }
             catch { }
-        }
-    }
-
-    private static async Task TryCloudRecycleAppAsync(string appUuid)
-    {
-        try
-        {
-            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-            var logDir = Path.Combine(localAppData, "ShadowBot", "log");
-            if (!Directory.Exists(logDir)) return;
-
-            string? token = null;
-            var logFiles = Directory.GetFiles(logDir, "*.log").OrderByDescending(File.GetLastWriteTime).Take(3);
-            var tokenRegex = new System.Text.RegularExpressions.Regex(@"current token:\[(.*?)\]");
-
-            foreach (var lf in logFiles)
-            {
-                try
-                {
-                    using var fs = new FileStream(lf, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                    using var sr = new StreamReader(fs, Encoding.UTF8);
-                    string? line;
-                    while ((line = sr.ReadLine()) != null)
-                    {
-                        var m = tokenRegex.Match(line);
-                        if (m.Success && !string.IsNullOrEmpty(m.Groups[1].Value))
-                        {
-                            token = m.Groups[1].Value.Trim();
-                        }
-                    }
-                    if (!string.IsNullOrEmpty(token)) break;
-                }
-                catch { }
-            }
-
-            if (string.IsNullOrEmpty(token)) return;
-
-            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"bearer {token}");
-            client.DefaultRequestHeaders.TryAddWithoutValidation("Xybot-Client-RequestId", Guid.NewGuid().ToString());
-
-            // 影刀控制台移入回收站接口
-            var url = $"https://api.yingdao.com/api/client/app/apps/{appUuid}/recycle";
-            using var req = new HttpRequestMessage(HttpMethod.Post, url);
-            req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
-            await client.SendAsync(req);
-        }
-        catch
-        {
-            // 云端静默尝试，失败不影响本地流程
         }
     }
 
