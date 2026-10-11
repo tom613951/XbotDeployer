@@ -3,8 +3,12 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Xml.Linq;
 using Microsoft.Data.Sqlite;
 
@@ -219,12 +223,41 @@ public static class Scanner
         var appsDir = Path.Combine(userDir, "apps");
         if (!Directory.Exists(appsDir)) return [];
 
+        // 查询影刀本地数据库中所有已被放入回收站 (isRecycleBin != 0) 的应用 UUID，在扫描时予以过滤，与影刀主界面保持一致
+        var recycledUuids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var dbPath = Path.Combine(userDir, "user.db3");
+        if (File.Exists(dbPath))
+        {
+            try
+            {
+                using var conn = new SqliteConnection($"Data Source={dbPath};Mode=ReadOnly");
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = "SELECT uuid FROM developmentsync_apps_v2 WHERE isRecycleBin != 0";
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    if (!reader.IsDBNull(0))
+                    {
+                        recycledUuids.Add(reader.GetString(0));
+                    }
+                }
+            }
+            catch
+            {
+                // ignore db read errors
+            }
+        }
+
         var apps = new List<ShadowBotApp>();
 
         foreach (var appFolder in Directory.GetDirectories(appsDir))
         {
             var folderUuid = Path.GetFileName(appFolder);
-            if (folderUuid.EndsWith("_temp", StringComparison.OrdinalIgnoreCase)) continue;
+            if (folderUuid.EndsWith("_temp", StringComparison.OrdinalIgnoreCase) ||
+                folderUuid.StartsWith("_deleted", StringComparison.OrdinalIgnoreCase)) continue;
+
+            if (recycledUuids.Contains(folderUuid)) continue;
 
             // Try appFolder directly or appFolder/xbot_robot
             var robotDir = appFolder;
@@ -376,13 +409,15 @@ public static class Scanner
     }
 
     /// <summary>
-    /// 删除应用并实时同步删除影刀本地数据库 (user.db3) 记录与本地文件
+    /// 删除应用并实时同步：标记影刀本地数据库 (user.db3) 回收状态、物理清理目录，并尝试同步云端回收
     /// </summary>
     public static (bool Success, string Message) DeleteApp(string userDir, ShadowBotApp app)
     {
         try
         {
-            // 1. 同步从影刀本地 SQLite 数据库 (user.db3) 移除记录
+            // 1. 同步影刀本地 SQLite 数据库 (user.db3)
+            // 影刀官方逻辑：将应用标记为回收站 (isRecycleBin = 1)，影刀主界面立即根据 isRecycleBin=0 隐藏，
+            // 且云同步时会上报回收状态，绝不会因为整行 DELETE 导致云端误判为“本地缺失”而自动复活。
             var dbPath = Path.Combine(userDir, "user.db3");
             if (File.Exists(dbPath))
             {
@@ -390,35 +425,150 @@ public static class Scanner
                 {
                     using var conn = new SqliteConnection($"Data Source={dbPath}");
                     conn.Open();
+                    var nowStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
                     using var cmd1 = conn.CreateCommand();
-                    cmd1.CommandText = "DELETE FROM developmentsync_apps_v2 WHERE uuid = @uuid";
+                    cmd1.CommandText = "UPDATE developmentsync_apps_v2 SET isRecycleBin = 1, recycleTime = @now, modifyTime = @now, isSynchronized = 0 WHERE uuid = @uuid";
+                    cmd1.Parameters.AddWithValue("@now", nowStr);
                     cmd1.Parameters.AddWithValue("@uuid", app.Uuid);
-                    cmd1.ExecuteNonQuery();
+                    var affected = cmd1.ExecuteNonQuery();
+
+                    // 若该表不存在此记录（例如纯本地测试应用），则执行物理清除
+                    if (affected == 0)
+                    {
+                        using var cmdDel = conn.CreateCommand();
+                        cmdDel.CommandText = "DELETE FROM developmentsync_apps_v2 WHERE uuid = @uuid";
+                        cmdDel.Parameters.AddWithValue("@uuid", app.Uuid);
+                        cmdDel.ExecuteNonQuery();
+                    }
 
                     using var cmd2 = conn.CreateCommand();
                     cmd2.CommandText = "DELETE FROM development_apps WHERE uuid = @uuid";
                     cmd2.Parameters.AddWithValue("@uuid", app.Uuid);
                     cmd2.ExecuteNonQuery();
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // 忽略数据库可能锁定的情况，继续物理清理
+                    System.Diagnostics.Debug.WriteLine($"数据库更新提示: {ex.Message}");
                 }
             }
 
-            // 2. 物理删除应用目录
+            // 2. 物理安全删除应用目录（消除只读属性，避免 Windows 权限拦截；若被锁定则移出扫描目录并异步清理）
             var targetDir = !string.IsNullOrEmpty(app.AppDir) && Directory.Exists(app.AppDir) ? app.AppDir : app.RobotDir;
             if (Directory.Exists(targetDir))
             {
-                Directory.Delete(targetDir, true);
+                SafeDeleteDirectory(targetDir);
             }
+
+            // 3. 尝试调用云端回收 API（若本地日志存在当前登录 token）
+            _ = Task.Run(() => TryCloudRecycleAppAsync(app.Uuid));
 
             return (true, "应用已成功删除并在影刀中同步移除。");
         }
         catch (Exception ex)
         {
             return (false, $"删除应用失败: {ex.Message}");
+        }
+    }
+
+    private static void SafeDeleteDirectory(string targetDir)
+    {
+        if (!Directory.Exists(targetDir)) return;
+
+        try
+        {
+            var di = new DirectoryInfo(targetDir);
+            foreach (var fi in di.GetFiles("*", SearchOption.AllDirectories))
+            {
+                try { fi.Attributes = FileAttributes.Normal; } catch { }
+            }
+            foreach (var sdi in di.GetDirectories("*", SearchOption.AllDirectories))
+            {
+                try { sdi.Attributes = FileAttributes.Normal; } catch { }
+            }
+            try { di.Attributes = FileAttributes.Normal; } catch { }
+
+            Directory.Delete(targetDir, true);
+        }
+        catch
+        {
+            // 若遇进程占用，重命名为 _deleted_ 临时文件夹移出应用扫描路径，并在后台重试异步清理
+            try
+            {
+                var parent = Path.GetDirectoryName(targetDir);
+                if (!string.IsNullOrEmpty(parent))
+                {
+                    var trashDir = Path.Combine(parent, $"_deleted_{Guid.NewGuid():N}");
+                    Directory.Move(targetDir, trashDir);
+                    Task.Run(() =>
+                    {
+                        for (int i = 0; i < 5; i++)
+                        {
+                            Thread.Sleep(1000);
+                            try
+                            {
+                                if (Directory.Exists(trashDir))
+                                {
+                                    Directory.Delete(trashDir, true);
+                                    break;
+                                }
+                            }
+                            catch { }
+                        }
+                    });
+                }
+            }
+            catch { }
+        }
+    }
+
+    private static async Task TryCloudRecycleAppAsync(string appUuid)
+    {
+        try
+        {
+            var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var logDir = Path.Combine(localAppData, "ShadowBot", "log");
+            if (!Directory.Exists(logDir)) return;
+
+            string? token = null;
+            var logFiles = Directory.GetFiles(logDir, "*.log").OrderByDescending(File.GetLastWriteTime).Take(3);
+            var tokenRegex = new System.Text.RegularExpressions.Regex(@"current token:\[(.*?)\]");
+
+            foreach (var lf in logFiles)
+            {
+                try
+                {
+                    using var fs = new FileStream(lf, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+                    using var sr = new StreamReader(fs, Encoding.UTF8);
+                    string? line;
+                    while ((line = sr.ReadLine()) != null)
+                    {
+                        var m = tokenRegex.Match(line);
+                        if (m.Success && !string.IsNullOrEmpty(m.Groups[1].Value))
+                        {
+                            token = m.Groups[1].Value.Trim();
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(token)) break;
+                }
+                catch { }
+            }
+
+            if (string.IsNullOrEmpty(token)) return;
+
+            using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"bearer {token}");
+            client.DefaultRequestHeaders.TryAddWithoutValidation("Xybot-Client-RequestId", Guid.NewGuid().ToString());
+
+            // 影刀控制台移入回收站接口
+            var url = $"https://api.yingdao.com/api/client/app/apps/{appUuid}/recycle";
+            using var req = new HttpRequestMessage(HttpMethod.Post, url);
+            req.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+            await client.SendAsync(req);
+        }
+        catch
+        {
+            // 云端静默尝试，失败不影响本地流程
         }
     }
 
