@@ -78,8 +78,8 @@ internal static class Dialogs
         // 选项区 (单选卡片)
         var optionsPanel = new System.Windows.Controls.StackPanel();
 
-        // 选项 1: 云端与本地同步彻底删除
-        var rbCloudAndLocal = new System.Windows.Controls.RadioButton
+        // 选项 1: 仅清除本地缓存 (默认推荐选中，避免用户误删云端数据)
+        var rbLocalOnly = new System.Windows.Controls.RadioButton
         {
             GroupName = "DeleteOption",
             IsChecked = true,
@@ -88,22 +88,22 @@ internal static class Dialogs
         var rb1Content = new System.Windows.Controls.StackPanel();
         rb1Content.Children.Add(new Wpf.Ui.Controls.TextBlock
         {
-            Text = "彻底删除（本地与影刀云端同步销毁）[推荐]",
+            Text = "仅清除本地缓存与文件 [默认推荐，防误删]",
             FontWeight = FontWeights.SemiBold,
             FontSize = 13
         });
         rb1Content.Children.Add(new Wpf.Ui.Controls.TextBlock
         {
-            Text = "彻底清理本地代码，并调用影刀云端接口彻底注销删除该应用，防止重新同步。",
+            Text = "仅删除本电脑上的本地代码目录以释放空间；保留影刀云端空间，可在影刀中随时重新下载。",
             FontSize = 11,
             Foreground = System.Windows.Media.Brushes.DarkGray,
             Margin = new Thickness(0, 2, 0, 0)
         });
-        rbCloudAndLocal.Content = rb1Content;
-        optionsPanel.Children.Add(rbCloudAndLocal);
+        rbLocalOnly.Content = rb1Content;
+        optionsPanel.Children.Add(rbLocalOnly);
 
-        // 选项 2: 仅清除本地缓存
-        var rbLocalOnly = new System.Windows.Controls.RadioButton
+        // 选项 2: 云端与本地同步彻底删除 (需用户主动手动勾选)
+        var rbCloudAndLocal = new System.Windows.Controls.RadioButton
         {
             GroupName = "DeleteOption",
             IsChecked = false,
@@ -112,19 +112,20 @@ internal static class Dialogs
         var rb2Content = new System.Windows.Controls.StackPanel();
         rb2Content.Children.Add(new Wpf.Ui.Controls.TextBlock
         {
-            Text = "仅清除本地缓存与文件",
+            Text = "彻底删除（本地与影刀云端同步销毁）[高危操作]",
             FontWeight = FontWeights.SemiBold,
-            FontSize = 13
+            FontSize = 13,
+            Foreground = System.Windows.Media.Brushes.OrangeRed
         });
         rb2Content.Children.Add(new Wpf.Ui.Controls.TextBlock
         {
-            Text = "仅删除本电脑上的本地代码目录以释放空间，保留影刀云端空间，可在影刀中重新下载。",
+            Text = "彻底清理本地代码，并调用影刀官方云端网关彻底注销销毁该应用，防止重新同步。",
             FontSize = 11,
             Foreground = System.Windows.Media.Brushes.DarkGray,
             Margin = new Thickness(0, 2, 0, 0)
         });
-        rbLocalOnly.Content = rb2Content;
-        optionsPanel.Children.Add(rbLocalOnly);
+        rbCloudAndLocal.Content = rb2Content;
+        optionsPanel.Children.Add(rbCloudAndLocal);
 
         System.Windows.Controls.Grid.SetRow(optionsPanel, 1);
         rootGrid.Children.Add(optionsPanel);
