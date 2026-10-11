@@ -49,11 +49,22 @@ public sealed class ShadowBotUser : INotifyPropertyChanged
 public sealed class ShadowBotApp : INotifyPropertyChanged
 {
     private bool _isSelected;
+    private string _name = "";
 
     public required string Uuid { get; init; }
-    public required string Name { get; init; }
+    public required string Name
+    {
+        get => _name;
+        set
+        {
+            if (_name == value) return;
+            _name = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Name)));
+        }
+    }
     public required string Version { get; init; }
     public required string RobotDir { get; init; }
+    public required string AppDir { get; init; }
     public required DateTime Mtime { get; init; }
     public required string MtimeStr { get; init; }
     public required long SizeBytes { get; init; }
@@ -252,6 +263,7 @@ public static class Scanner
                     Name = name,
                     Version = version,
                     RobotDir = robotDir,
+                    AppDir = appFolder,
                     Mtime = mtime,
                     MtimeStr = mtime.ToString("yyyy-MM-dd HH:mm:ss"),
                     SizeBytes = totalSize,
@@ -269,6 +281,145 @@ public static class Scanner
         }
 
         return apps.OrderByDescending(a => a.Mtime).ToList();
+    }
+
+    /// <summary>
+    /// 重命名应用并实时同步至本地 package.json 与影刀本地数据库 (user.db3)
+    /// </summary>
+    public static (bool Success, string Message) RenameApp(string userDir, ShadowBotApp app, string newName)
+    {
+        newName = newName.Trim();
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            return (false, "应用名称不能为空。");
+        }
+
+        var invalidChars = Path.GetInvalidFileNameChars();
+        if (newName.Any(c => invalidChars.Contains(c)))
+        {
+            return (false, "应用名称不能包含非法文件名字符 (\\ / : * ? \" < > |)。");
+        }
+
+        try
+        {
+            // 1. 同步更新文件系统中的 package.json
+            var pkgPaths = new List<string>();
+            var p1 = Path.Combine(app.RobotDir, "package.json");
+            if (File.Exists(p1)) pkgPaths.Add(p1);
+
+            if (!string.IsNullOrEmpty(app.AppDir) && !string.Equals(app.AppDir, app.RobotDir, StringComparison.OrdinalIgnoreCase))
+            {
+                var p2 = Path.Combine(app.AppDir, "package.json");
+                if (File.Exists(p2) && !pkgPaths.Contains(p2)) pkgPaths.Add(p2);
+            }
+
+            foreach (var pkgPath in pkgPaths)
+            {
+                try
+                {
+                    var content = File.ReadAllText(pkgPath);
+                    var node = System.Text.Json.Nodes.JsonNode.Parse(content);
+                    if (node is System.Text.Json.Nodes.JsonObject jo)
+                    {
+                        jo["name"] = newName;
+                        File.WriteAllText(pkgPath, jo.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    return (false, $"修改 package.json 失败: {ex.Message}");
+                }
+            }
+
+            // 2. 同步更新影刀 SQLite 数据库 (user.db3)
+            var dbPath = Path.Combine(userDir, "user.db3");
+            if (File.Exists(dbPath))
+            {
+                try
+                {
+                    using var conn = new SqliteConnection($"Data Source={dbPath}");
+                    conn.Open();
+                    var nowStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    var nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+                    using var cmd1 = conn.CreateCommand();
+                    cmd1.CommandText = "UPDATE developmentsync_apps_v2 SET name = @name, modifyTime = @now, developTimestamp = @nowMs, isSynchronized = 0 WHERE uuid = @uuid";
+                    cmd1.Parameters.AddWithValue("@name", newName);
+                    cmd1.Parameters.AddWithValue("@now", nowStr);
+                    cmd1.Parameters.AddWithValue("@nowMs", nowMs);
+                    cmd1.Parameters.AddWithValue("@uuid", app.Uuid);
+                    cmd1.ExecuteNonQuery();
+
+                    using var cmd2 = conn.CreateCommand();
+                    cmd2.CommandText = "UPDATE development_apps SET name = @name, modifyTime = @now, developTimestamp = @nowMs, isSynchronized = 0 WHERE uuid = @uuid";
+                    cmd2.Parameters.AddWithValue("@name", newName);
+                    cmd2.Parameters.AddWithValue("@now", nowStr);
+                    cmd2.Parameters.AddWithValue("@nowMs", nowMs);
+                    cmd2.Parameters.AddWithValue("@uuid", app.Uuid);
+                    cmd2.ExecuteNonQuery();
+                }
+                catch (Exception ex)
+                {
+                    // 数据库更新警告（可能影刀正在运行被短暂占用锁库），依然完成内存与文件更新
+                    app.Name = newName;
+                    return (true, $"文件重命名成功，但影刀本地数据库同步提示: {ex.Message}");
+                }
+            }
+
+            app.Name = newName;
+            return (true, "应用重命名成功，已同步至影刀！");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"重命名应用异常: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// 删除应用并实时同步删除影刀本地数据库 (user.db3) 记录与本地文件
+    /// </summary>
+    public static (bool Success, string Message) DeleteApp(string userDir, ShadowBotApp app)
+    {
+        try
+        {
+            // 1. 同步从影刀本地 SQLite 数据库 (user.db3) 移除记录
+            var dbPath = Path.Combine(userDir, "user.db3");
+            if (File.Exists(dbPath))
+            {
+                try
+                {
+                    using var conn = new SqliteConnection($"Data Source={dbPath}");
+                    conn.Open();
+
+                    using var cmd1 = conn.CreateCommand();
+                    cmd1.CommandText = "DELETE FROM developmentsync_apps_v2 WHERE uuid = @uuid";
+                    cmd1.Parameters.AddWithValue("@uuid", app.Uuid);
+                    cmd1.ExecuteNonQuery();
+
+                    using var cmd2 = conn.CreateCommand();
+                    cmd2.CommandText = "DELETE FROM development_apps WHERE uuid = @uuid";
+                    cmd2.Parameters.AddWithValue("@uuid", app.Uuid);
+                    cmd2.ExecuteNonQuery();
+                }
+                catch
+                {
+                    // 忽略数据库可能锁定的情况，继续物理清理
+                }
+            }
+
+            // 2. 物理删除应用目录
+            var targetDir = !string.IsNullOrEmpty(app.AppDir) && Directory.Exists(app.AppDir) ? app.AppDir : app.RobotDir;
+            if (Directory.Exists(targetDir))
+            {
+                Directory.Delete(targetDir, true);
+            }
+
+            return (true, "应用已成功删除并在影刀中同步移除。");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"删除应用失败: {ex.Message}");
+        }
     }
 
     private static long GetDirectorySize(DirectoryInfo d)

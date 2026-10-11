@@ -88,7 +88,33 @@
                     <DataGrid Grid.Row="1" x:Name="GridApps" AutoGenerateColumns="False" CanUserAddRows="False"
                               HeadersVisibility="Column" SelectionMode="Extended" SelectionUnit="FullRow"
                               BorderThickness="1" BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}"
-                              Background="Transparent" RowHeaderWidth="0" MouseDoubleClick="GridApps_MouseDoubleClick">
+                              Background="Transparent" RowHeaderWidth="0" MouseDoubleClick="GridApps_MouseDoubleClick"
+                              ContextMenuOpening="GridApps_ContextMenuOpening">
+                        <DataGrid.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="重命名应用" Click="MenuItem_Rename_Click">
+                                    <MenuItem.Icon>
+                                        <ui:SymbolIcon Symbol="Edit24" />
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <MenuItem Header="删除应用" Click="MenuItem_Delete_Click">
+                                    <MenuItem.Icon>
+                                        <ui:SymbolIcon Symbol="Delete24" Foreground="#E05555" />
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <Separator />
+                                <MenuItem Header="打开所在文件夹" Click="MenuItem_OpenFolder_Click">
+                                    <MenuItem.Icon>
+                                        <ui:SymbolIcon Symbol="FolderOpen24" />
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                                <MenuItem Header="查看应用详情" Click="MenuItem_Detail_Click">
+                                    <MenuItem.Icon>
+                                        <ui:SymbolIcon Symbol="Info24" />
+                                    </MenuItem.Icon>
+                                </MenuItem>
+                            </ContextMenu>
+                        </DataGrid.ContextMenu>
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow">
                                 <Setter Property="Margin" Value="0,1" />

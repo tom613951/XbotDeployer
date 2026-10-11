@@ -242,10 +242,46 @@ public partial class MainWindow : FluentWindow
 
     private List<ShadowBotApp> GetSelectedApps() => _allApps.Where(a => a.IsSelected).ToList();
 
+    private void GridApps_ContextMenuOpening(object sender, ContextMenuEventArgs e)
+    {
+        if (_isMigrating)
+        {
+            e.Handled = true;
+            return;
+        }
+
+        // 自动选中鼠标右键所在的行
+        var dep = e.OriginalSource as DependencyObject;
+        while (dep != null && dep is not DataGridRow)
+        {
+            dep = VisualTreeHelper.GetParent(dep);
+        }
+
+        if (dep is DataGridRow row && row.Item is ShadowBotApp clickedApp)
+        {
+            GridApps.SelectedItem = clickedApp;
+        }
+
+        if (GridApps.SelectedItem is not ShadowBotApp)
+        {
+            e.Handled = true;
+        }
+    }
+
     private void GridApps_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (GridApps.SelectedItem is not ShadowBotApp app) return;
+        ShowAppDetail(app);
+    }
 
+    private void MenuItem_Detail_Click(object sender, RoutedEventArgs e)
+    {
+        var app = (sender as FrameworkElement)?.DataContext as ShadowBotApp ?? GridApps.SelectedItem as ShadowBotApp;
+        if (app != null) ShowAppDetail(app);
+    }
+
+    private void ShowAppDetail(ShadowBotApp app)
+    {
         var detail = $"""
             应用名称: {app.Name}
             UUID: {app.Uuid}
@@ -253,10 +289,117 @@ public partial class MainWindow : FluentWindow
             流程数量: {app.FlowCount}
             文件大小: {app.SizeStr}
             修改时间: {app.MtimeStr}
-            本地路径: {app.RobotDir}
+            应用根目录: {app.AppDir}
+            代码路径: {app.RobotDir}
             """;
 
         Dialogs.Info(detail, "应用详情");
+    }
+
+    private void MenuItem_OpenFolder_Click(object sender, RoutedEventArgs e)
+    {
+        var app = (sender as FrameworkElement)?.DataContext as ShadowBotApp ?? GridApps.SelectedItem as ShadowBotApp;
+        if (app == null) return;
+
+        var targetDir = !string.IsNullOrEmpty(app.AppDir) && Directory.Exists(app.AppDir) ? app.AppDir : app.RobotDir;
+        if (Directory.Exists(targetDir))
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"\"{targetDir}\"",
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                Dialogs.Error($"无法打开目录: {ex.Message}", "打开目录失败");
+            }
+        }
+        else
+        {
+            Dialogs.Warn($"本地目录不存在: {targetDir}");
+        }
+    }
+
+    private void MenuItem_Rename_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isMigrating)
+        {
+            Dialogs.Warn("迁移任务正在进行中，无法重命名应用。");
+            return;
+        }
+
+        var app = (sender as FrameworkElement)?.DataContext as ShadowBotApp ?? GridApps.SelectedItem as ShadowBotApp;
+        if (app == null) return;
+
+        var newName = Dialogs.Prompt("请输入新的应用名称:", app.Name, "重命名应用");
+        if (string.IsNullOrWhiteSpace(newName) || newName.Trim() == app.Name) return;
+
+        newName = newName.Trim();
+        var userDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir ?? _currentUserDir;
+        if (string.IsNullOrEmpty(userDir))
+        {
+            Dialogs.Error("未获取到当前影刀用户目录。", "重命名失败");
+            return;
+        }
+
+        var oldName = app.Name;
+        var (ok, msg) = Scanner.RenameApp(userDir, app, newName);
+        if (ok)
+        {
+            FilterApps();
+            AppendLog($"[SUCCESS] 应用【{oldName}】已成功重命名为【{newName}】并在影刀中同步生效。");
+            Dialogs.Info($"应用已重命名为【{newName}】！\n影刀客户端已实时同步。", "重命名成功");
+        }
+        else
+        {
+            AppendLog($"[ERROR] 重命名应用【{oldName}】失败: {msg}");
+            Dialogs.Error(msg, "重命名失败");
+        }
+    }
+
+    private void MenuItem_Delete_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isMigrating)
+        {
+            Dialogs.Warn("迁移任务正在进行中，无法删除应用。");
+            return;
+        }
+
+        var app = (sender as FrameworkElement)?.DataContext as ShadowBotApp ?? GridApps.SelectedItem as ShadowBotApp;
+        if (app == null) return;
+
+        var confirm = Dialogs.Confirm(
+            $"确定要删除应用【{app.Name}】吗？\n\n此操作将彻底删除本地应用文件并从影刀中同步移除，无法撤销恢复！",
+            "删除应用确认"
+        );
+        if (!confirm) return;
+
+        var userDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir ?? _currentUserDir;
+        if (string.IsNullOrEmpty(userDir))
+        {
+            Dialogs.Error("未获取到当前影刀用户目录。", "删除失败");
+            return;
+        }
+
+        var deletedName = app.Name;
+        var (ok, msg) = Scanner.DeleteApp(userDir, app);
+        if (ok)
+        {
+            _allApps.Remove(app);
+            UpdateSelectedUserLabel(_allApps.Count);
+            FilterApps();
+            AppendLog($"[SUCCESS] 应用【{deletedName}】已彻底删除并在影刀中同步移除。");
+            Dialogs.Info($"应用【{deletedName}】已成功删除！", "删除成功");
+        }
+        else
+        {
+            AppendLog($"[ERROR] 删除应用【{deletedName}】失败: {msg}");
+            Dialogs.Error(msg, "删除失败");
+        }
     }
 
     // ----------------------------------------------------------------- export

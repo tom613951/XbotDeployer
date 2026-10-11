@@ -145,7 +145,7 @@ public sealed class ShadowBotDeployer
             ["activities"] = new JsonArray(),
             ["appFlowParamList"] = new JsonArray(),
             ["appIcon"] = pkgData["icon"]?.ToString() ?? "",
-            ["appType"] = "app",
+            ["appType"] = pkgData["robot_type"]?.ToString() ?? "app",
             ["blockCount"] = blockCount,
             ["customItems"] = pkgData["customItems"] != null ? JsonNode.Parse(pkgData["customItems"]!.ToJsonString()) : new JsonObject
             {
@@ -159,6 +159,8 @@ public sealed class ShadowBotDeployer
             ["elementLibraryCodes"] = new JsonArray(),
             ["enableViewSource"] = "false",
             ["externalDependencies"] = pkgData["external_dependencies"] != null ? JsonNode.Parse(pkgData["external_dependencies"]!.ToJsonString()) : new JsonArray(),
+            ["flows"] = pkgData["flows"] != null ? JsonNode.Parse(pkgData["flows"]!.ToJsonString()) : new JsonArray(),
+            ["flow_groups"] = pkgData["flow_groups"] != null ? JsonNode.Parse(pkgData["flow_groups"]!.ToJsonString()) : new JsonArray(),
             ["flowCount"] = flowCount,
             ["gifUrl"] = "",
             ["imageName"] = "",
@@ -169,7 +171,7 @@ public sealed class ShadowBotDeployer
             ["ipaasDependencies"] = pkgData["ipaasDependencies"] != null ? JsonNode.Parse(pkgData["ipaasDependencies"]!.ToJsonString()) : new JsonArray(),
             ["magicBlockCount"] = magicBlockCount,
             ["name"] = appName,
-            ["packageCode"] = "",
+            ["packageCode"] = pkgData["package_code"]?.ToString() ?? "",
             ["sourceLineCount"] = sourceLineCount,
             ["statistics"] = new JsonObject
             {
