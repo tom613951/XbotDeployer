@@ -409,51 +409,54 @@ public static class Scanner
     }
 
     /// <summary>
-    /// 删除应用并实时同步：优先通过影刀本地官方网关删除并上报云端、同步标记本地数据库回收状态，并彻底物理清理目录
+    /// 删除应用并实时同步：支持彻底删除（本地与云端同步销毁）或仅清除本地缓存
     /// </summary>
-    public static (bool Success, string Message) DeleteApp(string userDir, ShadowBotApp app)
+    public static (bool Success, string Message) DeleteApp(string userDir, ShadowBotApp app, bool deleteCloud = true)
     {
         try
         {
-            // 1. 优先调用影刀客户端本地官方 API 网关 (ApiHttpServer，端口 42500~42505)
-            // 该网关由影刀客户端后台运行，调用其 recycle 与 delete 接口可直接驱动影刀主进程从界面、内存及云端空间彻底销毁该应用！
-            var gatewayOk = TryShadowBotGatewayDelete(app.Uuid, app.RobotType);
-
-            // 2. 同步更新影刀本地 SQLite 数据库 (user.db3)
-            // 影刀官方机理：将应用标记为回收站 (isRecycleBin = 1)，影刀主界面立即根据 isRecycleBin=0 隐藏，
-            // 且后续云同步时会上报回收状态，绝不会因为直接整行 DELETE 导致云端误判为“本地缺失”而重新复活下载。
-            var dbPath = Path.Combine(userDir, "user.db3");
-            if (File.Exists(dbPath))
+            var gatewayOk = false;
+            if (deleteCloud)
             {
-                try
+                // 1. 若选择同步删除云端：优先调用影刀客户端本地官方 API 网关 (ApiHttpServer，端口 42500~42505) 彻底销毁
+                gatewayOk = TryShadowBotGatewayDelete(app.Uuid, app.RobotType);
+
+                // 2. 同步更新影刀本地 SQLite 数据库 (user.db3) 标记回收状态
+                // 影刀官方机理：将应用标记为回收站 (isRecycleBin = 1)，影刀主界面立即根据 isRecycleBin=0 隐藏，
+                // 且后续云同步时会上报回收状态，绝不会因为直接整行 DELETE 导致云端误判为“本地缺失”而重新复活下载。
+                var dbPath = Path.Combine(userDir, "user.db3");
+                if (File.Exists(dbPath))
                 {
-                    using var conn = new SqliteConnection($"Data Source={dbPath}");
-                    conn.Open();
-                    var nowStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-
-                    using var cmd1 = conn.CreateCommand();
-                    cmd1.CommandText = "UPDATE developmentsync_apps_v2 SET isRecycleBin = 1, recycleTime = @now, modifyTime = @now, isSynchronized = 0 WHERE uuid = @uuid";
-                    cmd1.Parameters.AddWithValue("@now", nowStr);
-                    cmd1.Parameters.AddWithValue("@uuid", app.Uuid);
-                    var affected = cmd1.ExecuteNonQuery();
-
-                    // 若该表不存在此记录（例如纯本地测试应用），则执行物理清除
-                    if (affected == 0)
+                    try
                     {
-                        using var cmdDel = conn.CreateCommand();
-                        cmdDel.CommandText = "DELETE FROM developmentsync_apps_v2 WHERE uuid = @uuid";
-                        cmdDel.Parameters.AddWithValue("@uuid", app.Uuid);
-                        cmdDel.ExecuteNonQuery();
-                    }
+                        using var conn = new SqliteConnection($"Data Source={dbPath}");
+                        conn.Open();
+                        var nowStr = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
 
-                    using var cmd2 = conn.CreateCommand();
-                    cmd2.CommandText = "DELETE FROM development_apps WHERE uuid = @uuid";
-                    cmd2.Parameters.AddWithValue("@uuid", app.Uuid);
-                    cmd2.ExecuteNonQuery();
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"数据库更新提示: {ex.Message}");
+                        using var cmd1 = conn.CreateCommand();
+                        cmd1.CommandText = "UPDATE developmentsync_apps_v2 SET isRecycleBin = 1, recycleTime = @now, modifyTime = @now, isSynchronized = 0 WHERE uuid = @uuid";
+                        cmd1.Parameters.AddWithValue("@now", nowStr);
+                        cmd1.Parameters.AddWithValue("@uuid", app.Uuid);
+                        var affected = cmd1.ExecuteNonQuery();
+
+                        // 若该表不存在此记录（例如纯本地测试应用），则执行物理清除
+                        if (affected == 0)
+                        {
+                            using var cmdDel = conn.CreateCommand();
+                            cmdDel.CommandText = "DELETE FROM developmentsync_apps_v2 WHERE uuid = @uuid";
+                            cmdDel.Parameters.AddWithValue("@uuid", app.Uuid);
+                            cmdDel.ExecuteNonQuery();
+                        }
+
+                        using var cmd2 = conn.CreateCommand();
+                        cmd2.CommandText = "DELETE FROM development_apps WHERE uuid = @uuid";
+                        cmd2.Parameters.AddWithValue("@uuid", app.Uuid);
+                        cmd2.ExecuteNonQuery();
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"数据库更新提示: {ex.Message}");
+                    }
                 }
             }
 
@@ -464,9 +467,17 @@ public static class Scanner
                 SafeDeleteDirectory(targetDir);
             }
 
-            var tip = gatewayOk
-                ? "应用已通过影刀客户端网关与本地数据库成功删除，云端与本地已同步清除！"
-                : "应用已在影刀本地数据库与文件中彻底移除，已同步标记回收状态。";
+            string tip;
+            if (deleteCloud)
+            {
+                tip = gatewayOk
+                    ? "应用已通过影刀客户端网关与本地数据库成功删除，云端与本地已同步清除！"
+                    : "应用已在影刀本地数据库与文件中彻底移除，已同步标记回收状态。";
+            }
+            else
+            {
+                tip = "应用本地缓存已安全清除，磁盘空间已释放；影刀云端空间已保留，后续可重新下载同步。";
+            }
 
             return (true, tip);
         }

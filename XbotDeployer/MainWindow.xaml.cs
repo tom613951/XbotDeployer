@@ -372,11 +372,10 @@ public partial class MainWindow : FluentWindow
         var app = (sender as FrameworkElement)?.DataContext as ShadowBotApp ?? GridApps.SelectedItem as ShadowBotApp;
         if (app == null) return;
 
-        var confirm = Dialogs.Confirm(
-            $"确定要删除应用【{app.Name}】吗？\n\n此操作将彻底删除本地应用文件并从影刀中同步移除，无法撤销恢复！",
-            "删除应用确认"
-        );
-        if (!confirm) return;
+        var mode = Dialogs.ConfirmDeleteWithOptions(app.Name);
+        if (mode == DeleteAppMode.Cancel) return;
+
+        var deleteCloud = mode == DeleteAppMode.CloudAndLocal;
 
         var userDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir ?? _currentUserDir;
         if (string.IsNullOrEmpty(userDir))
@@ -386,19 +385,21 @@ public partial class MainWindow : FluentWindow
         }
 
         var deletedName = app.Name;
-        var (ok, msg) = Scanner.DeleteApp(userDir, app);
+        var (ok, msg) = Scanner.DeleteApp(userDir, app, deleteCloud);
         if (ok)
         {
             _allApps.Remove(app);
             UpdateSelectedUserLabel(_allApps.Count);
             FilterApps();
-            AppendLog($"[SUCCESS] 应用【{deletedName}】已彻底删除并在影刀中同步移除。");
-            Dialogs.Info($"应用【{deletedName}】已成功删除！", "删除成功");
+
+            var actionDesc = deleteCloud ? "彻底删除（本地与云端同步）" : "清除本地缓存（云端已保留）";
+            AppendLog($"[SUCCESS] 应用【{deletedName}】{actionDesc}: {msg}");
+            Dialogs.Info(msg, "操作完成");
         }
         else
         {
-            AppendLog($"[ERROR] 删除应用【{deletedName}】失败: {msg}");
-            Dialogs.Error(msg, "删除失败");
+            AppendLog($"[ERROR] 处理应用【{deletedName}】失败: {msg}");
+            Dialogs.Error(msg, "操作失败");
         }
     }
 
