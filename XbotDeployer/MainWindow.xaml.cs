@@ -50,13 +50,13 @@ public partial class MainWindow : FluentWindow
 
     private void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        LoadUsersAndApps();
+        _ = LoadUsersAndApps();
         LoadContacts();
     }
 
     // ---------------------------------------------------------------- scanning
 
-    private async void LoadUsersAndApps()
+    private async Task LoadUsersAndApps(string? preferredUserDir = null)
     {
         LblAppSummary.Text = "正在扫描影刀账号...";
 
@@ -80,17 +80,23 @@ public partial class MainWindow : FluentWindow
                 return;
             }
 
-            CmbUsers.SelectedIndex = 0;
+            // 优先选择指定的目录；若未指定或新用户刚登录，默认选中最新活跃的第一个用户
+            var targetUser = !string.IsNullOrEmpty(preferredUserDir)
+                ? _users.FirstOrDefault(u => string.Equals(u.UserDir, preferredUserDir, StringComparison.OrdinalIgnoreCase))
+                : null;
+
+            targetUser ??= _users[0];
+            CmbUsers.SelectedItem = targetUser;
             _suppressUserChange = false;
+
+            await RefreshAppsAsync(targetUser.UserDir);
+            AppendLog($"[SUCCESS] 检测到 {_users.Count} 个影刀账号，当前聚焦: {targetUser.DisplayName}");
         }
         catch (Exception ex)
         {
             AppendLog($"[ERROR] 扫描影刀账号失败: {ex.Message}");
             LblAppSummary.Text = "扫描影刀账号失败";
-            return;
         }
-
-        await RefreshAppsAsync(_users[0].UserDir);
     }
 
     private void LoadContacts()
@@ -197,12 +203,11 @@ public partial class MainWindow : FluentWindow
         FilterApps();
     }
 
-    private void BtnRefresh_Click(object sender, RoutedEventArgs e)
+    private async void BtnRefresh_Click(object sender, RoutedEventArgs e)
     {
-        if (CmbUsers.SelectedItem is ShadowBotUser user)
-        {
-            _ = RefreshAppsAsync(user.UserDir);
-        }
+        AppendLog("[INFO] 正在刷新影刀账号与本地应用列表...");
+        var currentDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir;
+        await LoadUsersAndApps(currentDir);
     }
 
     private void SetBusy(bool busy)

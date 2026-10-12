@@ -106,21 +106,33 @@ public static class Scanner
         var usersRoot = Path.Combine(baseDir, "users");
         if (!Directory.Exists(usersRoot)) return [];
 
+        var ignoredFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "Assistant", "git-repo", "CrashDumps", "cache", "cef", "cef_main", "log", "update", "skills"
+        };
+
         var users = new List<ShadowBotUser>();
         foreach (var userDir in Directory.GetDirectories(usersRoot))
         {
-            var userId = Path.GetFileName(userDir);
-            if (!long.TryParse(userId, out _)) continue;
+            var folderName = Path.GetFileName(userDir);
+            if (ignoredFolders.Contains(folderName)) continue;
 
-            var appsDir = Path.Combine(userDir, "apps");
-            if (Directory.Exists(appsDir))
-            {
-                var displayName = GetUserDisplayName(userDir, usersRoot);
-                var appCount = ScanLocalApps(userDir).Count;
-                users.Add(new ShadowBotUser(userId, displayName, userDir, appCount));
-            }
+            // 只要目录下存在 user.db3 或 apps 目录，即为一个合法的影刀用户 Profile 目录（支持纯数字 ID 与 UUID 格式目录）
+            var hasDb = File.Exists(Path.Combine(userDir, "user.db3"));
+            var hasApps = Directory.Exists(Path.Combine(userDir, "apps"));
+            if (!hasDb && !hasApps) continue;
+
+            var displayName = GetUserDisplayName(userDir, usersRoot);
+            var appCount = ScanLocalApps(userDir).Count;
+            users.Add(new ShadowBotUser(folderName, displayName, userDir, appCount));
         }
-        return users;
+
+        // 根据用户目录或 user.db3 的最后修改时间降序排序（最近活跃登录的用户优先排在最前）
+        return users.OrderByDescending(u =>
+        {
+            var db = Path.Combine(u.UserDir, "user.db3");
+            return File.Exists(db) ? File.GetLastWriteTime(db) : Directory.GetLastWriteTime(u.UserDir);
+        }).ToList();
     }
 
     private static string GetUserDisplayName(string userDir, string usersRoot)
