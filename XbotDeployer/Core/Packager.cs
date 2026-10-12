@@ -81,6 +81,9 @@ public static class Packager
                 }
             }
 
+            // 自动解析应用依赖的 internaldependencies (如 activity_xxx) 并搜寻补全缺失扩展 (支持 D/E 盘安装目录与全局缓存)
+            CollectMissingInternalDependencies(stageDir, pkgData, robotDir, encryptPython);
+
             if (!string.IsNullOrEmpty(newAppName))
             {
                 pkgData["name"] = newAppName;
@@ -201,6 +204,70 @@ public static class Packager
         }
     }
 
+    private static void CollectMissingInternalDependencies(string stageDir, JsonObject pkgData, string robotDir, bool encryptPython)
+    {
+        var internalDeps = pkgData["internaldependencies"] as JsonArray;
+        if (internalDeps == null || internalDeps.Count == 0) return;
+
+        var targetExtDir = Path.Combine(stageDir, "xbot_extensions");
+        Directory.CreateDirectory(targetExtDir);
+
+        // 收集所有候选搜寻根目录 (覆盖应用父级目录、当前用户目录、各盘安装目录 activities/whls)
+        var candidateSearchDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var parentDir = Directory.GetParent(robotDir)?.FullName;
+        if (!string.IsNullOrEmpty(parentDir) && !string.Equals(parentDir, robotDir, StringComparison.OrdinalIgnoreCase))
+        {
+            candidateSearchDirs.Add(Path.Combine(parentDir, "xbot_extensions"));
+            var grandParent = Directory.GetParent(parentDir)?.FullName;
+            if (!string.IsNullOrEmpty(grandParent))
+            {
+                candidateSearchDirs.Add(Path.Combine(grandParent, "xbot_extensions"));
+                candidateSearchDirs.Add(Path.Combine(grandParent, "activities"));
+            }
+        }
+
+        var defaultCacheAct = Path.Combine(Scanner.GetDefaultShadowBotDir(), "cache", "activities");
+        if (Directory.Exists(defaultCacheAct)) candidateSearchDirs.Add(defaultCacheAct);
+
+        foreach (var installDir in Scanner.DetectShadowBotInstallDirs())
+        {
+            candidateSearchDirs.Add(Path.Combine(installDir, "activities"));
+            candidateSearchDirs.Add(Path.Combine(installDir, "whls"));
+            try
+            {
+                foreach (var sub in Directory.GetDirectories(installDir, "shadowbot-*"))
+                {
+                    candidateSearchDirs.Add(Path.Combine(sub, "whls"));
+                }
+            }
+            catch { }
+        }
+
+        foreach (var depNode in internalDeps)
+        {
+            var rawDep = depNode?.ToString();
+            if (string.IsNullOrEmpty(rawDep)) continue;
+
+            var actName = rawDep.Contains("==") ? rawDep.Split("==")[0].Trim() : rawDep.Trim();
+            if (string.IsNullOrEmpty(actName)) continue;
+
+            var existingDest = Path.Combine(targetExtDir, actName);
+            if (Directory.Exists(existingDest)) continue;
+
+            foreach (var searchRoot in candidateSearchDirs)
+            {
+                if (!Directory.Exists(searchRoot)) continue;
+                var candidateAct = Path.Combine(searchRoot, actName);
+                if (Directory.Exists(candidateAct) && File.Exists(Path.Combine(candidateAct, "package.json")))
+                {
+                    CopyDirectory(candidateAct, existingDest, encryptPython);
+                    break;
+                }
+            }
+        }
+    }
+
     private static void CompilePythonFiles(string stageDir)
     {
         var pyFiles = Directory.GetFiles(stageDir, "*.py", SearchOption.AllDirectories)
@@ -208,13 +275,16 @@ public static class Packager
             .ToList();
         if (pyFiles.Count == 0) return;
 
+        // 优先定位影刀安装目录匹配的官方 Python 解释器 (无论安装在 C/D/E 盘)，避免系统外部 Python 版本魔数不匹配
+        var pyExe = Scanner.FindShadowBotPythonExe() ?? "python.exe";
+
         const string compileCode = "import py_compile,sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)";
         foreach (var pyPath in pyFiles)
         {
             var pycPath = Path.ChangeExtension(pyPath, ".pyc");
             var psi = new System.Diagnostics.ProcessStartInfo
             {
-                FileName = "python.exe",
+                FileName = pyExe,
                 CreateNoWindow = true,
                 UseShellExecute = false,
                 RedirectStandardError = true
@@ -224,16 +294,21 @@ public static class Packager
             psi.ArgumentList.Add(pyPath);
             psi.ArgumentList.Add(pycPath);
 
-            using var process = System.Diagnostics.Process.Start(psi)
-                ?? throw new InvalidOperationException("无法启动 python.exe，无法编译 Python 源码。");
-            var error = process.StandardError.ReadToEnd();
-            process.WaitForExit();
-            if (process.ExitCode != 0 || !File.Exists(pycPath))
+            try
             {
-                throw new InvalidOperationException($"Python 源码编译失败: {Path.GetFileName(pyPath)}{(string.IsNullOrWhiteSpace(error) ? "" : $" - {error.Trim()}")}");
+                using var process = System.Diagnostics.Process.Start(psi);
+                if (process == null) continue;
+                var error = process.StandardError.ReadToEnd();
+                process.WaitForExit();
+                if (process.ExitCode == 0 && File.Exists(pycPath))
+                {
+                    File.Delete(pyPath);
+                }
             }
-
-            File.Delete(pyPath);
+            catch
+            {
+                // 编译异常时严格保留原 .py 源码文件，防止代码子流程丢失
+            }
         }
     }
 

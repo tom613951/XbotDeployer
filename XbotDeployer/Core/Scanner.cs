@@ -100,11 +100,126 @@ public static class Scanner
         return Path.Combine(localAppData, "ShadowBot");
     }
 
+    /// <summary>
+    /// 全自动探测全盘可能的影刀程序安装根目录 (覆盖 C/D/E/F 盘常见安装路径、进程与注册表)
+    /// </summary>
+    public static List<string> DetectShadowBotInstallDirs()
+    {
+        var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. 正在运行的 ShadowBot 进程
+        try
+        {
+            foreach (var p in System.Diagnostics.Process.GetProcessesByName("ShadowBot"))
+            {
+                try
+                {
+                    var exePath = p.MainModule?.FileName;
+                    if (!string.IsNullOrEmpty(exePath))
+                    {
+                        var dir = Path.GetDirectoryName(exePath);
+                        if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                        {
+                            dirs.Add(dir);
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+
+        // 2. 遍历所有就绪的逻辑磁盘驱动器 (C:\, D:\, E:\, F:\ 等) 匹配常见影刀安装路径
+        try
+        {
+            foreach (var drive in DriveInfo.GetDrives().Where(d => d.IsReady))
+            {
+                var candidates = new[]
+                {
+                    Path.Combine(drive.Name, "Program Files", "ShadowBot"),
+                    Path.Combine(drive.Name, "Program Files (x86)", "ShadowBot"),
+                    Path.Combine(drive.Name, "ShadowBot"),
+                    Path.Combine(drive.Name, "影刀", "ShadowBot"),
+                    Path.Combine(drive.Name, "影刀"),
+                    Path.Combine(drive.Name, "RPA", "ShadowBot"),
+                    Path.Combine(drive.Name, "Softwares", "ShadowBot")
+                };
+
+                foreach (var c in candidates)
+                {
+                    if (Directory.Exists(c)) dirs.Add(c);
+                }
+            }
+        }
+        catch { }
+
+        return dirs.ToList();
+    }
+
+    /// <summary>
+    /// 搜集所有可能的 ShadowBot users 数据根目录 (涵盖默认路径、自定义路径、各盘安装目录下的 users)
+    /// </summary>
+    public static List<string> GetCandidateUsersRoots(string? customBaseDir = null)
+    {
+        var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. 显式传入或用户手动指定的自定义目录
+        if (!string.IsNullOrEmpty(customBaseDir) && Directory.Exists(customBaseDir))
+        {
+            if (Path.GetFileName(customBaseDir).Equals("users", StringComparison.OrdinalIgnoreCase))
+            {
+                roots.Add(customBaseDir);
+            }
+            else
+            {
+                var subUsers = Path.Combine(customBaseDir, "users");
+                if (Directory.Exists(subUsers)) roots.Add(subUsers);
+                else roots.Add(customBaseDir);
+            }
+        }
+
+        // 2. 默认 %LOCALAPPDATA%\ShadowBot\users
+        var defUsers = Path.Combine(GetDefaultShadowBotDir(), "users");
+        if (Directory.Exists(defUsers)) roots.Add(defUsers);
+
+        // 3. 各探测到的安装目录下的 users 文件夹 (支持非 C 盘便携/集中存储)
+        foreach (var installDir in DetectShadowBotInstallDirs())
+        {
+            var uDir = Path.Combine(installDir, "users");
+            if (Directory.Exists(uDir)) roots.Add(uDir);
+        }
+
+        return roots.ToList();
+    }
+
+    /// <summary>
+    /// 查找影刀安装目录内置匹配的 Python 解释器 (无论安装在 C/D/E 盘，优先使用官方匹配的 python.exe)
+    /// </summary>
+    public static string? FindShadowBotPythonExe()
+    {
+        var installDirs = DetectShadowBotInstallDirs();
+        foreach (var dir in installDirs)
+        {
+            try
+            {
+                foreach (var sub in Directory.GetDirectories(dir, "shadowbot-*"))
+                {
+                    var py310 = Path.Combine(sub, "python310", "python.exe");
+                    if (File.Exists(py310)) return py310;
+
+                    var py = Path.Combine(sub, "python", "python.exe");
+                    if (File.Exists(py)) return py;
+                }
+            }
+            catch { }
+        }
+        return null;
+    }
+
     public static List<ShadowBotUser> GetShadowBotUsers(string? baseDir = null)
     {
-        baseDir ??= GetDefaultShadowBotDir();
-        var usersRoot = Path.Combine(baseDir, "users");
-        if (!Directory.Exists(usersRoot)) return [];
+        var usersRoots = GetCandidateUsersRoots(baseDir);
+        if (usersRoots.Count == 0) return [];
 
         var ignoredFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -112,19 +227,27 @@ public static class Scanner
         };
 
         var users = new List<ShadowBotUser>();
-        foreach (var userDir in Directory.GetDirectories(usersRoot))
+        var seenUserDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var usersRoot in usersRoots)
         {
-            var folderName = Path.GetFileName(userDir);
-            if (ignoredFolders.Contains(folderName)) continue;
+            if (!Directory.Exists(usersRoot)) continue;
 
-            // 只要目录下存在 user.db3 或 apps 目录，即为一个合法的影刀用户 Profile 目录（支持纯数字 ID 与 UUID 格式目录）
-            var hasDb = File.Exists(Path.Combine(userDir, "user.db3"));
-            var hasApps = Directory.Exists(Path.Combine(userDir, "apps"));
-            if (!hasDb && !hasApps) continue;
+            foreach (var userDir in Directory.GetDirectories(usersRoot))
+            {
+                var folderName = Path.GetFileName(userDir);
+                if (ignoredFolders.Contains(folderName)) continue;
+                if (!seenUserDirs.Add(userDir)) continue;
 
-            var displayName = GetUserDisplayName(userDir, usersRoot);
-            var appCount = ScanLocalApps(userDir).Count;
-            users.Add(new ShadowBotUser(folderName, displayName, userDir, appCount));
+                // 只要目录下存在 user.db3 或 apps 目录，即为一个合法的影刀用户 Profile 目录（支持纯数字 ID 与 UUID 格式目录）
+                var hasDb = File.Exists(Path.Combine(userDir, "user.db3"));
+                var hasApps = Directory.Exists(Path.Combine(userDir, "apps"));
+                if (!hasDb && !hasApps) continue;
+
+                var displayName = GetUserDisplayName(userDir, usersRoot);
+                var appCount = ScanLocalApps(userDir).Count;
+                users.Add(new ShadowBotUser(folderName, displayName, userDir, appCount));
+            }
         }
 
         // 根据用户目录或 user.db3 的最后修改时间降序排序（最近活跃登录的用户优先排在最前）

@@ -37,7 +37,8 @@
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="360" />
+                    <ColumnDefinition Width="340" />
+                    <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="Auto" />
                     <ColumnDefinition Width="*" />
@@ -50,8 +51,9 @@
                 
                 <ui:Button Grid.Column="2" Content="刷新列表" Icon="{ui:SymbolIcon Symbol=ArrowClockwise24}" Click="BtnRefresh_Click" Margin="0,0,8,0" />
                 <ui:Button Grid.Column="3" Content="清理缓存" Icon="{ui:SymbolIcon Symbol=Broom24}" Click="BtnCleanCache_Click" Margin="0,0,8,0" />
+                <ui:Button Grid.Column="4" Content="自定义目录" ToolTip="手动指定非默认盘符（D盘/E盘等）的影刀安装或数据目录" Icon="{ui:SymbolIcon Symbol=FolderOpen24}" Click="BtnCustomDir_Click" Margin="0,0,8,0" />
 
-                <ui:TextBlock Grid.Column="5" x:Name="LblAppSummary" Text="共 0 个应用" VerticalAlignment="Center" Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}" />
+                <ui:TextBlock Grid.Column="6" x:Name="LblAppSummary" Text="共 0 个应用" VerticalAlignment="Center" Foreground="{ui:ThemeResource TextFillColorSecondaryBrush}" />
             </Grid>
         </Border>
 

@@ -8,7 +8,7 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>XbotDeployer</AssemblyName>
     <RootNamespace>XbotDeployer</RootNamespace>
-    <Version>1.3.4</Version>
+    <Version>1.3.5</Version>
     <Authors>tom613951</Authors>
     <Description>ShadowBot application packaging, migration, and cloud deployment tool.</Description>
     <ApplicationIcon>Assets\app.ico</ApplicationIcon>
