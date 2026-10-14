@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using Microsoft.Data.Sqlite;
+using Microsoft.Win32;
 
 namespace XbotDeployer.Core;
 
@@ -101,11 +102,23 @@ public static class Scanner
     }
 
     /// <summary>
-    /// 全自动探测全盘可能的影刀程序安装根目录 (覆盖 C/D/E/F 盘常见安装路径、进程与注册表)
+    /// 全自动探测全盘可能的影刀程序安装根目录 (覆盖注册表 InstallPath、进程与常见安装路径)
     /// </summary>
     public static List<string> DetectShadowBotInstallDirs()
     {
         var dirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 0. 注册表权威来源：影刀安装时写入的 InstallPath (覆盖任意盘符/任意自定义目录)
+        //    HKLM\SOFTWARE\ShadowBot x64        -> InstallPath
+        //    Uninstall\{...}_is1                -> InstallLocation
+        //    注意：先前版本注释声称"覆盖注册表"但从未实现，导致非默认目录完全探测不到。
+        foreach (var installPath in ReadRegistryInstallPaths())
+        {
+            if (!string.IsNullOrEmpty(installPath) && Directory.Exists(installPath))
+            {
+                dirs.Add(installPath);
+            }
+        }
 
         // 1. 正在运行的 ShadowBot 进程
         try
@@ -157,6 +170,93 @@ public static class Scanner
     }
 
     /// <summary>
+    /// 读取注册表中影刀记录的安装位置（32/64 位视图、多个候选键），用于非默认盘符安装场景。
+    /// </summary>
+    private static List<string> ReadRegistryInstallPaths()
+    {
+        var results = new List<string>();
+
+        // 候选键：影刀自身写入的键 + 卸载登记项
+        var subKeys = new[]
+        {
+            @"SOFTWARE\ShadowBot x64",
+            @"SOFTWARE\ShadowBot",
+            @"SOFTWARE\WOW6432Node\ShadowBot x64",
+            @"SOFTWARE\WOW6432Node\ShadowBot"
+        };
+        var valueNames = new[] { "InstallPath", "InstallLocation", "Path", "InstallDir" };
+
+        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        {
+            RegistryKey? baseKey = null;
+            try
+            {
+                baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
+            }
+            catch
+            {
+                continue;
+            }
+
+            try
+            {
+                foreach (var sub in subKeys)
+                {
+                    try
+                    {
+                        using var key = baseKey.OpenSubKey(sub);
+                        if (key == null) continue;
+                        foreach (var vn in valueNames)
+                        {
+                            if (key.GetValue(vn) is string s && !string.IsNullOrWhiteSpace(s))
+                            {
+                                results.Add(s.Trim().TrimEnd('\\', '/'));
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // 卸载登记项：扫描 Uninstall 下所有子键，匹配 DisplayName 含 影刀/ShadowBot
+                foreach (var uninst in new[] { @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" })
+                {
+                    try
+                    {
+                        using var root = baseKey.OpenSubKey(uninst);
+                        if (root == null) continue;
+                        foreach (var name in root.GetSubKeyNames())
+                        {
+                            try
+                            {
+                                using var app = root.OpenSubKey(name);
+                                if (app == null) continue;
+                                var display = app.GetValue("DisplayName") as string ?? "";
+                                if (display.IndexOf("影刀", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                    display.IndexOf("ShadowBot", StringComparison.OrdinalIgnoreCase) < 0)
+                                {
+                                    continue;
+                                }
+                                if (app.GetValue("InstallLocation") is string loc && !string.IsNullOrWhiteSpace(loc))
+                                {
+                                    results.Add(loc.Trim().TrimEnd('\\', '/'));
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            finally
+            {
+                baseKey?.Dispose();
+            }
+        }
+
+        return results;
+    }
+
+    /// <summary>
     /// 搜集所有可能的 ShadowBot users 数据根目录 (涵盖默认路径、自定义路径、各盘安装目录下的 users)
     /// </summary>
     public static List<string> GetCandidateUsersRoots(string? customBaseDir = null)
@@ -193,7 +293,10 @@ public static class Scanner
     }
 
     /// <summary>
-    /// 查找影刀安装目录内置匹配的 Python 解释器 (无论安装在 C/D/E 盘，优先使用官方匹配的 python.exe)
+    /// 查找影刀安装目录内置匹配的 Python 解释器。
+    /// 关键：影刀应用代码实际运行在安装目录的 <c>python\</c>（3.7.x），而非 <c>python310\</c>。
+    /// 优先返回 <c>python\python.exe</c>，避免用 3.10 编译出的 .pyc 被 3.7 运行时拒绝加载
+    /// (ImportError: bad magic number) 导致代码型子流程丢失。
     /// </summary>
     public static string? FindShadowBotPythonExe()
     {
@@ -204,11 +307,131 @@ public static class Scanner
             {
                 foreach (var sub in Directory.GetDirectories(dir, "shadowbot-*"))
                 {
-                    var py310 = Path.Combine(sub, "python310", "python.exe");
-                    if (File.Exists(py310)) return py310;
-
+                    // 影刀运行时解释器优先（3.7.x）
                     var py = Path.Combine(sub, "python", "python.exe");
                     if (File.Exists(py)) return py;
+
+                    // 回退：其它版本的 python3xx 子目录（按目录名排序，保证确定性）
+                    foreach (var alt in Directory.GetDirectories(sub, "python3*"))
+                    {
+                        var altPy = Path.Combine(alt, "python.exe");
+                        if (File.Exists(altPy)) return altPy;
+                    }
+                }
+            }
+            catch { }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 读取指定应用虚拟环境声明的 Python 版本号（来自 <c>&lt;appDir&gt;\venv\pyvenv.cfg</c> 的 <c>version =</c>）。
+    /// 返回如 "3.7.4"；读取失败返回 null。
+    /// </summary>
+    public static string? ReadAppPythonVersion(string robotDir)
+    {
+        try
+        {
+            // 兼容两种布局：apps/<uuid>/xbot_robot（venv 在父级）
+            //                apps/<uuid>（robotDir 即应用根，venv 在同级）
+            var candidates = new List<string>();
+            var parent = Directory.GetParent(robotDir)?.FullName;
+            if (!string.IsNullOrEmpty(parent)) candidates.Add(Path.Combine(parent, "venv", "pyvenv.cfg"));
+            candidates.Add(Path.Combine(robotDir, "venv", "pyvenv.cfg"));
+
+            var cfg = candidates.FirstOrDefault(File.Exists);
+            if (cfg == null) return null;
+
+            foreach (var line in File.ReadAllLines(cfg))
+            {
+                var t = line.Trim();
+                if (!t.StartsWith("version", StringComparison.OrdinalIgnoreCase)) continue;
+                var idx = t.IndexOf('=');
+                if (idx < 0) continue;
+                var v = t[(idx + 1)..].Trim();
+                if (!string.IsNullOrEmpty(v)) return v;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    private static readonly Dictionary<string, string?> _pyVerCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 询问解释器自身的 major.minor 版本（如 "3.7"）。结果按路径缓存；失败返回 null。
+    /// </summary>
+    public static string? GetPythonMajorMinor(string? pythonExe)
+    {
+        if (string.IsNullOrEmpty(pythonExe) || !File.Exists(pythonExe)) return null;
+        lock (_pyVerCache)
+        {
+            // 只缓存成功结果：瞬时失败（如杀软拦截）不应被永久固化
+            if (_pyVerCache.TryGetValue(pythonExe, out var cached) && cached != null) return cached;
+        }
+
+        string? result = null;
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = pythonExe,
+                CreateNoWindow = true,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add("import sys;print('%d.%d'%sys.version_info[:2])");
+            using var proc = System.Diagnostics.Process.Start(psi);
+            if (proc != null)
+            {
+                // 必须并发排空两个管道：只读 stdout 会在 stderr 写满缓冲时死锁。
+                var outTask = proc.StandardOutput.ReadToEndAsync();
+                var errTask = proc.StandardError.ReadToEndAsync();
+                if (proc.WaitForExit(10000))
+                {
+                    var outp = outTask.GetAwaiter().GetResult().Trim();
+                    _ = errTask.GetAwaiter().GetResult();
+                    if (proc.ExitCode == 0 && outp.Length is > 0 and < 16) result = outp;
+                }
+                else
+                {
+                    try { proc.Kill(true); } catch { }
+                }
+            }
+        }
+        catch { }
+
+        if (result != null)
+        {
+            lock (_pyVerCache) { _pyVerCache[pythonExe] = result; }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// 在影刀安装目录中查找与指定 major.minor（如 "3.7"）一致的解释器；找不到返回 null。
+    /// </summary>
+    public static string? FindPythonExeMatching(string? majorMinor)
+    {
+        if (string.IsNullOrEmpty(majorMinor)) return null;
+
+        foreach (var dir in DetectShadowBotInstallDirs())
+        {
+            try
+            {
+                foreach (var sub in Directory.GetDirectories(dir, "shadowbot-*"))
+                {
+                    foreach (var alt in Directory.GetDirectories(sub, "python*"))
+                    {
+                        var exe = Path.Combine(alt, "python.exe");
+                        if (!File.Exists(exe)) continue;
+                        if (string.Equals(GetPythonMajorMinor(exe), majorMinor, StringComparison.Ordinal))
+                        {
+                            return exe;
+                        }
+                    }
                 }
             }
             catch { }

@@ -29,6 +29,8 @@ public static class CryptoHelper
     public static (JsonDocument? Doc, bool WasEncrypted) DecryptFlowData(byte[] rawData)
     {
         var text = Encoding.UTF8.GetString(rawData).Trim();
+        // 剥离 UTF-8 BOM：.NET 的 Trim() 不会移除 U+FEFF，会导致本工具读不回自己写出的文件。
+        text = text.TrimStart('\uFEFF').Trim();
         if (text.StartsWith('{'))
         {
             try

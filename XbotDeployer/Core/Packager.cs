@@ -11,6 +11,11 @@ namespace XbotDeployer.Core;
 
 public static class Packager
 {
+    /// <summary>
+    /// 影刀自身写出的 json 均为无 BOM UTF-8；带 BOM 会让影刀读取失败（其 Trim 无法去除 U+FEFF）。
+    /// </summary>
+    private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+
     public static string CalculateMd5(string filePath)
     {
         using var md5 = MD5.Create();
@@ -110,12 +115,17 @@ public static class Packager
 
             if (encryptPython)
             {
-                CompilePythonFiles(stageDir);
+                // 按应用 venv 声明的运行时版本选择匹配解释器，避免 .pyc 魔数不匹配
+                var runtimeVer = Scanner.ReadAppPythonVersion(robotDir);
+                var runtimeMM = string.IsNullOrEmpty(runtimeVer)
+                    ? null
+                    : string.Join('.', runtimeVer.Split('.').Take(2));
+                CompilePythonFiles(stageDir, runtimeMM);
                 pkgData["encrypt_bot"] = true;
             }
 
-            // Write back package.json
-            File.WriteAllText(pkgFile, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+            // Write back package.json (无 BOM：影刀自身写出的 package.json 均无 BOM)
+            File.WriteAllText(pkgFile, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Utf8NoBom);
 
             // Repair .dev/*.flow.json display names
             RepairFlowBlockDisplays(stageDir, pkgData);
@@ -136,7 +146,8 @@ public static class Packager
             if (File.Exists(zipPath)) File.Delete(zipPath);
 
             var outJsonPath = Path.Combine(outTargetDir, "package.json");
-            File.WriteAllText(outJsonPath, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Encoding.UTF8);
+            // 该文件会上传为云端元数据，必须与 package.bot 内的一致：无 BOM。
+            File.WriteAllText(outJsonPath, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Utf8NoBom);
 
             // Zip archive (统一使用标准正斜杠路径，确保影刀云端与客户端跨平台解压兼容)
             CreateStandardZip(stageDir, zipPath);
@@ -184,6 +195,10 @@ public static class Packager
             ".git", ".svn", "__pycache__", ".vscode", ".idea", "venv", "venv310"
         };
 
+        // 必须显式创建目标目录：源目录若不含（未被忽略的）子目录，
+        // 下面的子目录循环不会创建它，随后的 File.Copy 会抛 DirectoryNotFoundException。
+        Directory.CreateDirectory(destDir);
+
         foreach (var dir in Directory.GetDirectories(sourceDir))
         {
             var dirName = Path.GetFileName(dir);
@@ -196,7 +211,14 @@ public static class Packager
         foreach (var file in Directory.GetFiles(sourceDir))
         {
             var ext = Path.GetExtension(file);
-            if (ext.Equals(".pyc", StringComparison.OrdinalIgnoreCase) && !encryptPython) continue;
+            // 仅当存在同名 .py 源码时才跳过 .pyc（避免源码与字节码重复）；
+            // 若应用此前已被 encrypt_bot 处理过（只剩 .pyc、无 .py），必须保留 .pyc，
+            // 否则整条代码型子流程体会在打包时消失。
+            if (ext.Equals(".pyc", StringComparison.OrdinalIgnoreCase) && !encryptPython)
+            {
+                var siblingPy = Path.ChangeExtension(file, ".py");
+                if (File.Exists(siblingPy)) continue;
+            }
 
             var fileName = Path.GetFileName(file);
             var targetFile = Path.Combine(destDir, fileName);
@@ -255,6 +277,7 @@ public static class Packager
             var existingDest = Path.Combine(targetExtDir, actName);
             if (Directory.Exists(existingDest)) continue;
 
+            var copied = false;
             foreach (var searchRoot in candidateSearchDirs)
             {
                 if (!Directory.Exists(searchRoot)) continue;
@@ -262,21 +285,207 @@ public static class Packager
                 if (Directory.Exists(candidateAct) && File.Exists(Path.Combine(candidateAct, "package.json")))
                 {
                     CopyDirectory(candidateAct, existingDest, encryptPython);
+                    copied = true;
                     break;
+                }
+            }
+
+            // 缓存兜底：%LOCALAPPDATA%\ShadowBot\cache\activities\<act>\ 下只有版本号 .zip
+            // （无解压后的 package.json），因此上面的目录判定永远不会命中。这里直接从 .zip 解出。
+            if (!copied)
+            {
+                if (TryExtractFromCacheZip(actName, existingDest, rawDep))
+                {
+                    continue;
                 }
             }
         }
     }
 
-    private static void CompilePythonFiles(string stageDir)
+    /// <summary>
+    /// 从影刀全局指令集缓存 <c>cache\activities\&lt;act&gt;\&lt;version&gt;.zip</c> 中解出扩展。
+    /// 优先选择与依赖声明版本一致的 zip，其次取版本号最大的一个。
+    /// 注意：影刀缓存 zip 为 ZipCrypto 加密，无口令不可解；此时必须放弃（返回 false），
+    /// 否则 .NET 会把密文原样写出，导致依赖"静默损坏"——比缺失更难排查。
+    /// </summary>
+    private static bool TryExtractFromCacheZip(string actName, string destDir, string rawDep)
+    {
+        try
+        {
+            var cacheRoot = Path.Combine(Scanner.GetDefaultShadowBotDir(), "cache", "activities", actName);
+            if (!Directory.Exists(cacheRoot)) return false;
+
+            var zips = Directory.GetFiles(cacheRoot, "*.zip");
+            if (zips.Length == 0) return false;
+
+            string? chosen = null;
+            if (rawDep.Contains("=="))
+            {
+                var wantVer = rawDep.Split("==")[1].Trim();
+                chosen = zips.FirstOrDefault(z =>
+                    string.Equals(Path.GetFileNameWithoutExtension(z), wantVer, StringComparison.OrdinalIgnoreCase));
+            }
+            chosen ??= zips
+                .OrderByDescending(z => ParseVersion(Path.GetFileNameWithoutExtension(z)))
+                .First();
+
+            // 加密 zip 直接放弃：无法解密，强行解压只会产出密文垃圾
+            if (IsZipEncrypted(chosen)) return false;
+
+            var temp = Path.Combine(Path.GetTempPath(), $"xbot_act_{Guid.NewGuid():N}");
+            try
+            {
+                System.IO.Compression.ZipFile.ExtractToDirectory(chosen, temp);
+                // zip 根可能是 {package.json, .dev/, *.py}（官方形态），也可能多一层目录
+                var src = File.Exists(Path.Combine(temp, "package.json"))
+                    ? temp
+                    : Directory.GetDirectories(temp).FirstOrDefault(d => File.Exists(Path.Combine(d, "package.json")));
+                if (src == null) return false;
+
+                // 解出内容必须是合法 JSON，否则视为损坏，不得进包
+                if (!IsValidJsonFile(Path.Combine(src, "package.json"))) return false;
+
+                CopyDirectory(src, destDir, encryptPython: false);
+                if (!File.Exists(Path.Combine(destDir, "package.json")) ||
+                    !IsValidJsonFile(Path.Combine(destDir, "package.json")))
+                {
+                    TryDeleteDir(destDir);
+                    return false;
+                }
+                return true;
+            }
+            finally
+            {
+                TryDeleteDir(temp);
+            }
+        }
+        catch
+        {
+            TryDeleteDir(destDir);
+            return false;
+        }
+    }
+
+    private static void TryDeleteDir(string dir)
+    {
+        try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { }
+    }
+
+    private static bool IsValidJsonFile(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return false;
+            using var doc = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+            return doc.RootElement.ValueKind == JsonValueKind.Object;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// 检测 zip 是否使用加密条目（general purpose bit flag 的 bit0）。
+    /// .NET 的 ZipFile 对加密的 STORED 条目既不抛异常也不解密，会静默写出密文，
+    /// 因此必须在解压前用原始字节自行判断。
+    /// 只在【中央目录】区间内扫描：若全文件扫描，文件数据中偶然出现的 PK\x01\x02
+    /// 且其后 bit0 为 1 时，会把合法未加密 zip 误判为加密。
+    /// </summary>
+    private static bool IsZipEncrypted(string zipPath)
+    {
+        try
+        {
+            var bytes = File.ReadAllBytes(zipPath);
+
+            // 定位 EOCD（0x06054b50）：从尾部向前找，其 +12 为中央目录偏移，+10 为条目数
+            int eocd = -1;
+            for (int i = bytes.Length - 22; i >= 0 && i >= bytes.Length - 22 - 65536; i--)
+            {
+                if (bytes[i] == 0x50 && bytes[i + 1] == 0x4B && bytes[i + 2] == 0x05 && bytes[i + 3] == 0x06)
+                {
+                    eocd = i;
+                    break;
+                }
+            }
+            if (eocd < 0) return false;   // 非 zip：交由下游解压抛错处理
+
+            var cdSize = (uint)(bytes[eocd + 12] | (bytes[eocd + 13] << 8) | (bytes[eocd + 14] << 16) | (bytes[eocd + 15] << 24));
+            var cdOffset = (uint)(bytes[eocd + 16] | (bytes[eocd + 17] << 8) | (bytes[eocd + 18] << 16) | (bytes[eocd + 19] << 24));
+
+            long start = cdOffset;
+            long end = Math.Min((long)cdOffset + cdSize, bytes.Length);
+            if (start < 0 || start >= bytes.Length || end <= start) return false;
+
+            // 只在中央目录内按条目头步进扫描（避免 O(n) 全量误命中）
+            for (long i = start; i + 10 <= end;)
+            {
+                if (bytes[i] == 0x50 && bytes[i + 1] == 0x4B && bytes[i + 2] == 0x01 && bytes[i + 3] == 0x02)
+                {
+                    var flag = (ushort)(bytes[i + 8] | (bytes[i + 9] << 8));
+                    if ((flag & 0x0001) != 0) return true;
+
+                    // 跳到下一条目：固定 46 字节 + 文件名/扩展区/注释长度
+                    int nameLen = bytes[i + 28] | (bytes[i + 29] << 8);
+                    int extraLen = bytes[i + 30] | (bytes[i + 31] << 8);
+                    int cmtLen = bytes[i + 32] | (bytes[i + 33] << 8);
+                    i += 46 + nameLen + extraLen + cmtLen;
+                }
+                else
+                {
+                    break;   // 中央目录结构异常，不再继续
+                }
+            }
+            return false;
+        }
+        catch
+        {
+            // 无法判定时按"不可用"处理，避免写入未知内容
+            return true;
+        }
+    }
+
+    private static Version ParseVersion(string s)
+    {
+        var parts = s.Split('.');
+        var nums = new List<int>();
+        foreach (var p in parts)
+        {
+            if (int.TryParse(p, out var n)) nums.Add(n);
+            else break;
+        }
+        while (nums.Count < 4) nums.Add(0);
+        return new Version(nums[0], nums[1], nums[2], nums[3]);
+    }
+
+    private static void CompilePythonFiles(string stageDir, string? runtimeMajorMinor)
     {
         var pyFiles = Directory.GetFiles(stageDir, "*.py", SearchOption.AllDirectories)
             .Where(path => !Path.GetFileName(path).Equals("__init__.py", StringComparison.OrdinalIgnoreCase))
             .ToList();
         if (pyFiles.Count == 0) return;
 
-        // 优先定位影刀安装目录匹配的官方 Python 解释器 (无论安装在 C/D/E 盘)，避免系统外部 Python 版本魔数不匹配
-        var pyExe = Scanner.FindShadowBotPythonExe() ?? "python.exe";
+        // 关键修复：必须使用与"应用运行时"一致的 Python 解释器编译。
+        // 影刀应用代码运行在安装目录的 python\ (3.7.x)；若用 python310\ 编译，产出的 .pyc
+        // 魔数不同，运行时导入会抛 ImportError: bad magic number，导致代码型子流程丢失。
+        // 无法确定运行时版本时，宁可不编译（保留 .py 源码），也绝不产出不可加载的 .pyc。
+        if (string.IsNullOrEmpty(runtimeMajorMinor))
+        {
+            return;
+        }
+
+        var pyExe = Scanner.FindPythonExeMatching(runtimeMajorMinor);
+        if (string.IsNullOrEmpty(pyExe))
+        {
+            return;
+        }
+
+        // 解释器自身版本必须与目标运行时一致，否则一律不编译
+        var exeVer = Scanner.GetPythonMajorMinor(pyExe);
+        if (!string.Equals(exeVer, runtimeMajorMinor, StringComparison.Ordinal))
+        {
+            return;
+        }
 
         const string compileCode = "import py_compile,sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)";
         foreach (var pyPath in pyFiles)
@@ -298,8 +507,18 @@ public static class Packager
             {
                 using var process = System.Diagnostics.Process.Start(psi);
                 if (process == null) continue;
-                var error = process.StandardError.ReadToEnd();
-                process.WaitForExit();
+                // 并发排空两个管道，避免 stderr 写满缓冲导致死锁；并设置超时防止解释器卡死。
+                var errTask = process.StandardError.ReadToEndAsync();
+                var errText = "";
+                if (process.WaitForExit(30000))
+                {
+                    errText = errTask.GetAwaiter().GetResult();
+                }
+                else
+                {
+                    try { process.Kill(true); } catch { }
+                    continue;   // 超时：保留 .py 源码
+                }
                 if (process.ExitCode == 0 && File.Exists(pycPath))
                 {
                     File.Delete(pyPath);
@@ -314,20 +533,12 @@ public static class Packager
 
     private static void RepairFlowBlockDisplays(string stageDir, JsonObject pkgData)
     {
+        // 仅处理【本应用自身】的 .dev 目录（stageDir 即 xbot_robot 的内容层）。
+        // 不可递归扫描 stageDir 下所有 .dev：xbot_extensions\activity_*\ 内也有各自的 .dev，
+        // 那些流程的显示名不属于本应用 package.json 的 flows[]，套用会导致 8% 的扩展流程显示名被错误覆盖。
         var devDirs = new List<string>();
         var rootDev = Path.Combine(stageDir, ".dev");
         if (Directory.Exists(rootDev)) devDirs.Add(rootDev);
-        try
-        {
-            foreach (var d in Directory.GetDirectories(stageDir, ".dev", SearchOption.AllDirectories))
-            {
-                if (!devDirs.Contains(d, StringComparer.OrdinalIgnoreCase))
-                {
-                    devDirs.Add(d);
-                }
-            }
-        }
-        catch { }
         if (devDirs.Count == 0) return;
 
         var flows = pkgData["flows"] as JsonArray;
@@ -388,9 +599,10 @@ public static class Packager
                     : flowFile;
 
                 // 核心修复：始终确保明文 *.flow.json 存在且包含完整内容，解决 ShadowBot 编辑器加载子流程为空的根本问题
+                // 无 BOM：影刀自身写出的 778 个 .flow.json 全部无 BOM，带 BOM 会被其 Trim 逻辑漏掉。
                 if (modified || !File.Exists(plainFlowFile) || flowFile.EndsWith(".enc", StringComparison.OrdinalIgnoreCase))
                 {
-                    File.WriteAllText(plainFlowFile, updatedJson, Encoding.UTF8);
+                    File.WriteAllText(plainFlowFile, updatedJson, Utf8NoBom);
                 }
 
                 // 如果原文件是以 .enc 结尾的加密文件，同时写回最新的 AES-CBC 加密内容，保持双格式严格同步
