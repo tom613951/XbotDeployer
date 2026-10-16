@@ -45,31 +45,6 @@ public static class Packager
             // Copy files ignoring vcs and cache
             CopyDirectory(robotDir, stageDir, encryptPython);
 
-            // 检查父级应用目录是否伴生扩展指令库 (xbot_extensions) 与元素选择器库 (xbot_selectors)
-            var parentDir = Directory.GetParent(robotDir)?.FullName;
-            if (!string.IsNullOrEmpty(parentDir) && !string.Equals(parentDir, robotDir, StringComparison.OrdinalIgnoreCase))
-            {
-                var extDir = Path.Combine(parentDir, "xbot_extensions");
-                if (Directory.Exists(extDir))
-                {
-                    var targetExtDir = Path.Combine(stageDir, "xbot_extensions");
-                    if (!Directory.Exists(targetExtDir))
-                    {
-                        CopyDirectory(extDir, targetExtDir, encryptPython);
-                    }
-                }
-
-                var selDir = Path.Combine(parentDir, "xbot_selectors");
-                if (Directory.Exists(selDir))
-                {
-                    var targetSelDir = Path.Combine(stageDir, "xbot_selectors");
-                    if (!Directory.Exists(targetSelDir))
-                    {
-                        CopyDirectory(selDir, targetSelDir, encryptPython);
-                    }
-                }
-            }
-
             // Read and update package.json
             var pkgFile = Path.Combine(stageDir, "package.json");
             JsonObject pkgData = [];
@@ -85,9 +60,6 @@ public static class Packager
                     // ignore
                 }
             }
-
-            // 自动解析应用依赖的 internaldependencies (如 activity_xxx) 并搜寻补全缺失扩展 (支持 D/E 盘安装目录与全局缓存)
-            CollectMissingInternalDependencies(stageDir, pkgData, robotDir, encryptPython);
 
             if (!string.IsNullOrEmpty(newAppName))
             {
@@ -126,9 +98,6 @@ public static class Packager
 
             // Write back package.json (无 BOM：影刀自身写出的 package.json 均无 BOM)
             File.WriteAllText(pkgFile, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Utf8NoBom);
-
-            // Repair .dev/*.flow.json display names
-            RepairFlowBlockDisplays(stageDir, pkgData);
 
             // Target output directory
             string outTargetDir;
@@ -226,7 +195,7 @@ public static class Packager
         }
     }
 
-    private static void CollectMissingInternalDependencies(string stageDir, JsonObject pkgData, string robotDir, bool encryptPython)
+    internal static void CollectMissingInternalDependencies(string stageDir, JsonObject pkgData, string robotDir, bool encryptPython)
     {
         var internalDeps = pkgData["internaldependencies"] as JsonArray;
         if (internalDeps == null || internalDeps.Count == 0) return;
@@ -531,7 +500,7 @@ public static class Packager
         }
     }
 
-    private static void RepairFlowBlockDisplays(string stageDir, JsonObject pkgData)
+    internal static void RepairFlowBlockDisplays(string stageDir, JsonObject pkgData)
     {
         // 仅处理【本应用自身】的 .dev 目录（stageDir 即 xbot_robot 的内容层）。
         // 不可递归扫描 stageDir 下所有 .dev：xbot_extensions\activity_*\ 内也有各自的 .dev，

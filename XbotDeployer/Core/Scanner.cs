@@ -186,70 +186,73 @@ public static class Scanner
         };
         var valueNames = new[] { "InstallPath", "InstallLocation", "Path", "InstallDir" };
 
-        foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
+        foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
         {
-            RegistryKey? baseKey = null;
-            try
+            foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
             {
-                baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, view);
-            }
-            catch
-            {
-                continue;
-            }
-
-            try
-            {
-                foreach (var sub in subKeys)
+                RegistryKey? baseKey = null;
+                try
                 {
-                    try
-                    {
-                        using var key = baseKey.OpenSubKey(sub);
-                        if (key == null) continue;
-                        foreach (var vn in valueNames)
-                        {
-                            if (key.GetValue(vn) is string s && !string.IsNullOrWhiteSpace(s))
-                            {
-                                results.Add(s.Trim().TrimEnd('\\', '/'));
-                            }
-                        }
-                    }
-                    catch { }
+                    baseKey = RegistryKey.OpenBaseKey(hive, view);
+                }
+                catch
+                {
+                    continue;
                 }
 
-                // 卸载登记项：扫描 Uninstall 下所有子键，匹配 DisplayName 含 影刀/ShadowBot
-                foreach (var uninst in new[] { @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" })
+                try
                 {
-                    try
+                    foreach (var sub in subKeys)
                     {
-                        using var root = baseKey.OpenSubKey(uninst);
-                        if (root == null) continue;
-                        foreach (var name in root.GetSubKeyNames())
+                        try
                         {
-                            try
+                            using var key = baseKey.OpenSubKey(sub);
+                            if (key == null) continue;
+                            foreach (var vn in valueNames)
                             {
-                                using var app = root.OpenSubKey(name);
-                                if (app == null) continue;
-                                var display = app.GetValue("DisplayName") as string ?? "";
-                                if (display.IndexOf("影刀", StringComparison.OrdinalIgnoreCase) < 0 &&
-                                    display.IndexOf("ShadowBot", StringComparison.OrdinalIgnoreCase) < 0)
+                                if (key.GetValue(vn) is string s && !string.IsNullOrWhiteSpace(s))
                                 {
-                                    continue;
-                                }
-                                if (app.GetValue("InstallLocation") is string loc && !string.IsNullOrWhiteSpace(loc))
-                                {
-                                    results.Add(loc.Trim().TrimEnd('\\', '/'));
+                                    results.Add(s.Trim().TrimEnd('\\', '/'));
                                 }
                             }
-                            catch { }
                         }
+                        catch { }
                     }
-                    catch { }
+
+                    // 卸载登记项：扫描 Uninstall 下所有子键，匹配 DisplayName 含 影刀/ShadowBot
+                    foreach (var uninst in new[] { @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall" })
+                    {
+                        try
+                        {
+                            using var root = baseKey.OpenSubKey(uninst);
+                            if (root == null) continue;
+                            foreach (var name in root.GetSubKeyNames())
+                            {
+                                try
+                                {
+                                    using var app = root.OpenSubKey(name);
+                                    if (app == null) continue;
+                                    var display = app.GetValue("DisplayName") as string ?? "";
+                                    if (display.IndexOf("影刀", StringComparison.OrdinalIgnoreCase) < 0 &&
+                                        display.IndexOf("ShadowBot", StringComparison.OrdinalIgnoreCase) < 0)
+                                    {
+                                        continue;
+                                    }
+                                    if (app.GetValue("InstallLocation") is string loc && !string.IsNullOrWhiteSpace(loc))
+                                    {
+                                        results.Add(loc.Trim().TrimEnd('\\', '/'));
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+                    }
                 }
-            }
-            finally
-            {
-                baseKey?.Dispose();
+                finally
+                {
+                    baseKey?.Dispose();
+                }
             }
         }
 
