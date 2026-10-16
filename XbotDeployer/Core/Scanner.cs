@@ -260,32 +260,17 @@ public static class Scanner
     }
 
     /// <summary>
-    /// 搜集所有可能的 ShadowBot users 数据根目录 (涵盖默认路径、自定义路径、各盘安装目录下的 users)
+    /// 搜集所有可能的 ShadowBot users 数据根目录 (涵盖默认路径、各盘安装目录下的 users)
     /// </summary>
-    public static List<string> GetCandidateUsersRoots(string? customBaseDir = null)
+    public static List<string> GetCandidateUsersRoots()
     {
         var roots = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // 1. 显式传入或用户手动指定的自定义目录
-        if (!string.IsNullOrEmpty(customBaseDir) && Directory.Exists(customBaseDir))
-        {
-            if (Path.GetFileName(customBaseDir).Equals("users", StringComparison.OrdinalIgnoreCase))
-            {
-                roots.Add(customBaseDir);
-            }
-            else
-            {
-                var subUsers = Path.Combine(customBaseDir, "users");
-                if (Directory.Exists(subUsers)) roots.Add(subUsers);
-                else roots.Add(customBaseDir);
-            }
-        }
-
-        // 2. 默认 %LOCALAPPDATA%\ShadowBot\users
+        // 1. 默认 %LOCALAPPDATA%\ShadowBot\users
         var defUsers = Path.Combine(GetDefaultShadowBotDir(), "users");
         if (Directory.Exists(defUsers)) roots.Add(defUsers);
 
-        // 3. 各探测到的安装目录下的 users 文件夹 (支持非 C 盘便携/集中存储)
+        // 2. 各探测到的安装目录下的 users 文件夹 (支持非 C 盘便携/集中存储)
         foreach (var installDir in DetectShadowBotInstallDirs())
         {
             var uDir = Path.Combine(installDir, "users");
@@ -442,9 +427,9 @@ public static class Scanner
         return null;
     }
 
-    public static List<ShadowBotUser> GetShadowBotUsers(string? baseDir = null)
+    public static List<ShadowBotUser> GetShadowBotUsers()
     {
-        var usersRoots = GetCandidateUsersRoots(baseDir);
+        var usersRoots = GetCandidateUsersRoots();
         if (usersRoots.Count == 0) return [];
 
         var ignoredFolders = new HashSet<string>(StringComparer.OrdinalIgnoreCase)

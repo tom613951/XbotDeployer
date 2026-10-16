@@ -29,7 +29,6 @@ public partial class MainWindow : FluentWindow
     private bool _suppressUserChange;
     private int _scanVersion;
     private string? _currentUserDir;
-    private string? _customBaseDir;
 
     public MainWindow()
     {
@@ -63,7 +62,7 @@ public partial class MainWindow : FluentWindow
 
         try
         {
-            _users = await Task.Run(() => Scanner.GetShadowBotUsers(_customBaseDir));
+            _users = await Task.Run(() => Scanner.GetShadowBotUsers());
 
             _suppressUserChange = true;
             CmbUsers.ItemsSource = null;
@@ -209,23 +208,6 @@ public partial class MainWindow : FluentWindow
         AppendLog("[INFO] 正在刷新影刀账号与本地应用列表...");
         var currentDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir;
         await LoadUsersAndApps(currentDir);
-    }
-
-    private async void BtnCustomDir_Click(object sender, RoutedEventArgs e)
-    {
-        var dialog = new OpenFolderDialog
-        {
-            Title = "选择非默认盘符（D盘/E盘等）的影刀安装目录或 users 数据目录"
-        };
-
-        if (dialog.ShowDialog() != true) return;
-
-        var selected = dialog.FolderName;
-        if (string.IsNullOrWhiteSpace(selected) || !Directory.Exists(selected)) return;
-
-        _customBaseDir = selected;
-        AppendLog($"[INFO] 已手动指定影刀目录: {_customBaseDir}，正在重新扫描...");
-        await LoadUsersAndApps();
     }
 
     private void SetBusy(bool busy)
