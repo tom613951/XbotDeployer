@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -14,7 +15,16 @@ public static class Packager
     /// <summary>
     /// 影刀自身写出的 json 均为无 BOM UTF-8；带 BOM 会让影刀读取失败（其 Trim 无法去除 U+FEFF）。
     /// </summary>
-    private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+    public static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+
+    /// <summary>
+    /// 标准 JSON 输出配置：保持缩进，同时使用 UnsafeRelaxedJsonEscaping 确保中文等字符原样输出为 UTF-8，杜绝 \uXXXX 转义。
+    /// </summary>
+    public static readonly JsonSerializerOptions JsonWriteOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     public static string CalculateMd5(string filePath)
     {
@@ -85,6 +95,12 @@ public static class Packager
                 pkgData["package_code"] = actCode;
             }
 
+            // 确保依赖指令集完整性
+            CollectMissingInternalDependencies(stageDir, pkgData, robotDir, encryptPython);
+
+            // 确保每个在 package.json flows 中声明的子流程文件完整就绪（Visual/Code），并保留 workspace.state.json
+            EnsureSubflowIntegrity(stageDir, pkgData, robotDir);
+
             if (encryptPython)
             {
                 // 按应用 venv 声明的运行时版本选择匹配解释器，避免 .pyc 魔数不匹配
@@ -96,8 +112,11 @@ public static class Packager
                 pkgData["encrypt_bot"] = true;
             }
 
-            // Write back package.json (无 BOM：影刀自身写出的 package.json 均无 BOM)
-            File.WriteAllText(pkgFile, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Utf8NoBom);
+            // 修复流程内部积木块显示名与明文 flow.json 同步，确保接收端影刀编辑器完整加载子流程
+            RepairFlowBlockDisplays(stageDir, pkgData);
+
+            // Write back package.json (无 BOM：影刀自身写出的 package.json 均无 BOM，并杜绝 Unicode 转义)
+            File.WriteAllText(pkgFile, pkgData.ToJsonString(JsonWriteOptions), Utf8NoBom);
 
             // Target output directory
             string outTargetDir;
@@ -115,8 +134,8 @@ public static class Packager
             if (File.Exists(zipPath)) File.Delete(zipPath);
 
             var outJsonPath = Path.Combine(outTargetDir, "package.json");
-            // 该文件会上传为云端元数据，必须与 package.bot 内的一致：无 BOM。
-            File.WriteAllText(outJsonPath, pkgData.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), Utf8NoBom);
+            // 该文件会上传为云端元数据，必须与 package.bot 内的一致：无 BOM，且中文原样 UTF-8 传输。
+            File.WriteAllText(outJsonPath, pkgData.ToJsonString(JsonWriteOptions), Utf8NoBom);
 
             // Zip archive (统一使用标准正斜杠路径，确保影刀云端与客户端跨平台解压兼容)
             CreateStandardZip(stageDir, zipPath);
@@ -500,6 +519,201 @@ public static class Packager
         }
     }
 
+    internal static void EnsureSubflowIntegrity(string stageDir, JsonObject pkgData, string robotDir)
+    {
+        var flows = pkgData["flows"] as JsonArray;
+        var stageDev = Path.Combine(stageDir, ".dev");
+        Directory.CreateDirectory(stageDev);
+
+        // 1. 确保并保留 workspace.state.json（影刀设计器打开流程标签页与工作区布局所必需）
+        var stageStateFile = Path.Combine(stageDev, "workspace.state.json");
+        if (!File.Exists(stageStateFile))
+        {
+            var candidateStateDirs = new[]
+            {
+                Path.Combine(robotDir, ".dev"),
+                robotDir,
+                Directory.GetParent(robotDir)?.FullName != null ? Path.Combine(Directory.GetParent(robotDir)!.FullName, ".dev") : null
+            };
+            foreach (var cDir in candidateStateDirs)
+            {
+                if (string.IsNullOrEmpty(cDir)) continue;
+                var srcState = Path.Combine(cDir, "workspace.state.json");
+                if (File.Exists(srcState))
+                {
+                    try
+                    {
+                        File.Copy(srcState, stageStateFile, true);
+                        break;
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        // 如果依然不存在，根据 flows 自动生成标准的 workspace.state.json，杜绝接收端编辑器打不开子流程标签
+        if (!File.Exists(stageStateFile) && flows != null && flows.Count > 0)
+        {
+            try
+            {
+                var opened = new JsonArray();
+                var startup = pkgData["startup"]?.ToString() ?? "main";
+                opened.Add(startup);
+                foreach (var fl in flows)
+                {
+                    var nm = fl?["name"]?.ToString() ?? fl?["filename"]?.ToString();
+                    if (!string.IsNullOrEmpty(nm) && !opened.Any(x => x?.ToString() == nm))
+                    {
+                        opened.Add(nm);
+                    }
+                }
+                var defaultState = new JsonObject
+                {
+                    ["openedFlows"] = opened,
+                    ["activeBottomPanel"] = "流程参数",
+                    ["activeFlow"] = startup,
+                    ["breakPoints"] = new JsonArray()
+                };
+                File.WriteAllText(stageStateFile, defaultState.ToJsonString(JsonWriteOptions), Utf8NoBom);
+            }
+            catch { }
+        }
+
+        if (flows == null || flows.Count == 0) return;
+
+        // 收集源目录及其父级目录（支持 apps/<uuid>/xbot_robot 与 apps/<uuid> 两种结构）
+        var candidateSrcDirs = new List<string> { robotDir };
+        var parentDir = Directory.GetParent(robotDir)?.FullName;
+        if (!string.IsNullOrEmpty(parentDir) && !string.Equals(parentDir, robotDir, StringComparison.OrdinalIgnoreCase))
+        {
+            candidateSrcDirs.Add(parentDir);
+            var subRobot = Path.Combine(parentDir, "xbot_robot");
+            if (Directory.Exists(subRobot) && !candidateSrcDirs.Contains(subRobot))
+            {
+                candidateSrcDirs.Add(subRobot);
+            }
+        }
+
+        // 2. 遍历校验并修复 package.json 中声明的每一个流程文件
+        foreach (var fl in flows)
+        {
+            if (fl is not JsonObject fo) continue;
+            var fn = fo["filename"]?.ToString();
+            var kind = fo["kind"]?.ToString() ?? "Visual";
+            if (string.IsNullOrEmpty(fn)) continue;
+
+            if (string.Equals(kind, "Visual", StringComparison.OrdinalIgnoreCase))
+            {
+                var plainFlowPath = Path.Combine(stageDev, $"{fn}.flow.json");
+                var encFlowPath = Path.Combine(stageDev, $"{fn}.flow.json.enc");
+
+                // 若只有 .enc，将其解密生成明文 .flow.json
+                if (!File.Exists(plainFlowPath) && File.Exists(encFlowPath))
+                {
+                    try
+                    {
+                        var encBytes = File.ReadAllBytes(encFlowPath);
+                        var (doc, _) = CryptoHelper.DecryptFlowData(encBytes);
+                        if (doc != null)
+                        {
+                            var text = doc.RootElement.GetRawText();
+                            File.WriteAllText(plainFlowPath, text, Utf8NoBom);
+                        }
+                    }
+                    catch { }
+                }
+
+                // 若 stageDir 内均未找到，从源目录各候选路径中深度检索
+                if (!File.Exists(plainFlowPath))
+                {
+                    foreach (var sDir in candidateSrcDirs)
+                    {
+                        var srcPlain = Path.Combine(sDir, ".dev", $"{fn}.flow.json");
+                        var srcEnc = Path.Combine(sDir, ".dev", $"{fn}.flow.json.enc");
+
+                        if (File.Exists(srcPlain))
+                        {
+                            try
+                            {
+                                File.Copy(srcPlain, plainFlowPath, true);
+                                break;
+                            }
+                            catch { }
+                        }
+                        else if (File.Exists(srcEnc))
+                        {
+                            try
+                            {
+                                File.Copy(srcEnc, encFlowPath, true);
+                                var encBytes = File.ReadAllBytes(srcEnc);
+                                var (doc, _) = CryptoHelper.DecryptFlowData(encBytes);
+                                if (doc != null)
+                                {
+                                    var text = doc.RootElement.GetRawText();
+                                    File.WriteAllText(plainFlowPath, text, Utf8NoBom);
+                                    break;
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                }
+
+                // 确保证书或旧版本遗留的 base64 密文文件被彻底解密为标准 JSON
+                if (File.Exists(plainFlowPath))
+                {
+                    try
+                    {
+                        var rawBytes = File.ReadAllBytes(plainFlowPath);
+                        var (doc, wasEncrypted) = CryptoHelper.DecryptFlowData(rawBytes);
+                        if (doc != null && wasEncrypted)
+                        {
+                            var text = doc.RootElement.GetRawText();
+                            File.WriteAllText(plainFlowPath, text, Utf8NoBom);
+                        }
+                    }
+                    catch { }
+                }
+                else
+                {
+                    // 若完全找不到源文件，生成标准空可视化流程骨架，防止影刀打不开报错
+                    try
+                    {
+                        var stub = new JsonObject
+                        {
+                            ["name"] = fo["name"]?.ToString() ?? fn,
+                            ["memo"] = "",
+                            ["kind"] = "visual",
+                            ["blocks"] = new JsonArray()
+                        };
+                        File.WriteAllText(plainFlowPath, stub.ToJsonString(JsonWriteOptions), Utf8NoBom);
+                    }
+                    catch { }
+                }
+            }
+            else if (string.Equals(kind, "Code", StringComparison.OrdinalIgnoreCase))
+            {
+                var pyFile = Path.Combine(stageDir, $"{fn}.py");
+                if (!File.Exists(pyFile))
+                {
+                    foreach (var sDir in candidateSrcDirs)
+                    {
+                        var srcPy = Path.Combine(sDir, $"{fn}.py");
+                        if (File.Exists(srcPy))
+                        {
+                            try
+                            {
+                                File.Copy(srcPy, pyFile, true);
+                                break;
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     internal static void RepairFlowBlockDisplays(string stageDir, JsonObject pkgData)
     {
         // 仅处理【本应用自身】的 .dev 目录（stageDir 即 xbot_robot 的内容层）。
@@ -560,7 +774,7 @@ public static class Packager
                     modified = RepairBlocksRecursive(blocks, flowMap);
                 }
 
-                var updatedJson = flowObj.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+                var updatedJson = flowObj.ToJsonString(JsonWriteOptions);
 
                 // 确定对应的明文 *.flow.json 路径
                 var plainFlowFile = flowFile.EndsWith(".enc", StringComparison.OrdinalIgnoreCase)
@@ -599,15 +813,15 @@ public static class Packager
             var bName = bObj["name"]?.ToString() ?? "";
             var inputs = bObj["inputs"] as JsonObject;
             var proc = inputs?["process"] as JsonObject;
-            if (proc != null || bName.Contains("process.run", StringComparison.OrdinalIgnoreCase))
+            if (proc != null)
             {
-                var val = proc?["value"]?.ToString();
+                var val = proc["value"]?.ToString();
                 if (!string.IsNullOrEmpty(val))
                 {
                     var targetFn = val.Contains(':') ? val.Split(':')[^1] : val;
                     if (flowMap.TryGetValue(targetFn, out var expectedName))
                     {
-                        if (proc!["display"]?.ToString() != expectedName)
+                        if (proc["display"]?.ToString() != expectedName)
                         {
                             proc["display"] = expectedName;
                             modified = true;
@@ -618,15 +832,15 @@ public static class Packager
 
             // 检查 process.invoke_module (如调用 Python 模块或代码子流程 B_Down 等)
             var mod = inputs?["module"] as JsonObject;
-            if (mod != null || bName.Contains("process.invoke_module", StringComparison.OrdinalIgnoreCase))
+            if (mod != null)
             {
-                var val = mod?["value"]?.ToString();
+                var val = mod["value"]?.ToString();
                 if (!string.IsNullOrEmpty(val))
                 {
                     var targetFn = val.Contains(':') ? val.Split(':')[^1] : val;
                     if (flowMap.TryGetValue(targetFn, out var expectedName))
                     {
-                        if (mod!["display"]?.ToString() != expectedName)
+                        if (mod["display"]?.ToString() != expectedName)
                         {
                             mod["display"] = expectedName;
                             modified = true;
@@ -636,7 +850,7 @@ public static class Packager
             }
 
             // 递归处理积木块内部嵌套的容器块（如 if、loop、try 等子流程积木集合）
-            foreach (var containerKey in new[] { "children", "blocks", "body", "subBlocks" })
+            foreach (var containerKey in new[] { "children", "blocks", "body", "subBlocks", "elseBody", "tryBody", "catchBody", "finallyBody" })
             {
                 if (bObj[containerKey] is JsonArray subBlocks && subBlocks.Count > 0)
                 {

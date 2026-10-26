@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -95,6 +96,11 @@ public sealed class ShadowBotApp : INotifyPropertyChanged
 
 public static class Scanner
 {
+    private static readonly JsonSerializerOptions JsonWriteOptions = new()
+    {
+        WriteIndented = true,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
     public static string GetDefaultShadowBotDir()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
@@ -701,7 +707,7 @@ public static class Scanner
                     if (node is System.Text.Json.Nodes.JsonObject jo)
                     {
                         jo["name"] = newName;
-                        File.WriteAllText(pkgPath, jo.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+                        File.WriteAllText(pkgPath, jo.ToJsonString(JsonWriteOptions), Packager.Utf8NoBom);
                     }
                 }
                 catch (Exception ex)
@@ -854,7 +860,7 @@ public static class Scanner
                 var recycleUrl = $"http://127.0.0.1:{port}/api/v1/apps/{appUuid}/recycle";
                 using var recycleReq = new HttpRequestMessage(HttpMethod.Post, recycleUrl);
                 recycleReq.Content = new StringContent(
-                    JsonSerializer.Serialize(new { AppType = appType }),
+                    JsonSerializer.Serialize(new { AppType = appType }, JsonWriteOptions),
                     Encoding.UTF8,
                     "application/json"
                 );

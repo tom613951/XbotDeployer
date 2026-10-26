@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
@@ -12,6 +13,11 @@ namespace XbotDeployer.Core;
 
 public sealed class ShadowBotDeployer
 {
+    private static readonly JsonSerializerOptions JsonWriteOptions = new()
+    {
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
     private readonly string _apiBaseUrl;
     private readonly HttpClient _httpClient;
 
@@ -42,7 +48,7 @@ public sealed class ShadowBotDeployer
             version,
             isBot
         };
-        request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        request.Content = new StringContent(JsonSerializer.Serialize(payload, JsonWriteOptions), Encoding.UTF8, "application/json");
 
         try
         {
@@ -133,21 +139,19 @@ public sealed class ShadowBotDeployer
         request.Headers.TryAddWithoutValidation("Authorization", $"bearer {targetToken}");
         request.Headers.TryAddWithoutValidation("Xybot-Client-RequestId", Guid.NewGuid().ToString());
 
-        var stats = pkgData["statistics"] as JsonObject;
-        var flows = pkgData["flows"] as JsonArray;
-        var flowCount = flows?.Count ?? 1;
-        var blockCount = stats?["blockCount"]?.GetValue<int>() ?? 1;
-        var magicBlockCount = stats?["magicBlockCount"]?.GetValue<int>() ?? 0;
-        var sourceLineCount = stats?["sourceLineCount"]?.GetValue<int>() ?? 0;
-
+        // 对齐官方应用规范与 Xbot Deployer.exe 原生逆向协议 (VA 0x4224CB / 0x422500 - 0x423800)：
+        // 1. appPackage 仅包含核心元数据与统计信息，严禁在 appPackage 中序列化 flows / flow_groups 数组。
+        //    子流程定义完全由 package.bot 内部的 package.json 及上传的元数据 package.json 权威承载；
+        //    向 /app/develop/create 传递 flows 会触发服务端反序列化与覆写，导致云端同步时子流程丢失或变为空白。
+        // 2. appType 始终为 "app"，与 assignUploadUrl 保持一致。
+        // 3. 字符使用 JsonWriteOptions (UnsafeRelaxedJsonEscaping) 原样 UTF-8 传输，杜绝 Unicode 转义 (\uXXXX) 导致的流程名或应用名乱码。
         var appPackage = new JsonObject
         {
             ["activities"] = new JsonArray(),
             ["appFlowParamList"] = new JsonArray(),
-            ["appIcon"] = pkgData["icon"]?.ToString() ?? "",
-            ["appType"] = pkgData["robot_type"]?.ToString() ?? "app",
-            ["blockCount"] = blockCount,
-            ["customItems"] = pkgData["customItems"] != null ? JsonNode.Parse(pkgData["customItems"]!.ToJsonString()) : new JsonObject
+            ["appIcon"] = "",
+            ["appType"] = "app",
+            ["customItems"] = new JsonObject
             {
                 ["gifUrl"] = "",
                 ["imageName"] = "",
@@ -155,33 +159,31 @@ public sealed class ShadowBotDeployer
                 ["uiaType"] = "PC",
                 ["videoUrl"] = ""
             },
-            ["description"] = pkgData["description"]?.ToString() ?? "",
+            ["description"] = "",
             ["elementLibraryCodes"] = new JsonArray(),
             ["enableViewSource"] = "false",
-            ["externalDependencies"] = pkgData["external_dependencies"] != null ? JsonNode.Parse(pkgData["external_dependencies"]!.ToJsonString()) : new JsonArray(),
-            ["flows"] = pkgData["flows"] != null ? JsonNode.Parse(pkgData["flows"]!.ToJsonString()) : new JsonArray(),
-            ["flow_groups"] = pkgData["flow_groups"] != null ? JsonNode.Parse(pkgData["flow_groups"]!.ToJsonString()) : new JsonArray(),
-            ["flowCount"] = flowCount,
-            ["gifUrl"] = "",
-            ["imageName"] = "",
-            ["imageUrl"] = "",
-            ["instruction"] = pkgData["instruction"]?.ToString() ?? "",
-            ["internalDependencies"] = pkgData["internaldependencies"] != null ? JsonNode.Parse(pkgData["internaldependencies"]!.ToJsonString()) : new JsonArray(),
-            ["internalautodependencies"] = pkgData["internalautodependencies"] != null ? JsonNode.Parse(pkgData["internalautodependencies"]!.ToJsonString()) : new JsonArray(),
-            ["ipaasDependencies"] = pkgData["ipaasDependencies"] != null ? JsonNode.Parse(pkgData["ipaasDependencies"]!.ToJsonString()) : new JsonArray(),
-            ["magicBlockCount"] = magicBlockCount,
+            ["externalDependencies"] = pkgData["external_dependencies"] != null
+                ? JsonNode.Parse(pkgData["external_dependencies"]!.ToJsonString(JsonWriteOptions))
+                : new JsonArray(),
+            ["instruction"] = "",
+            ["internalDependencies"] = pkgData["internaldependencies"] != null
+                ? JsonNode.Parse(pkgData["internaldependencies"]!.ToJsonString(JsonWriteOptions))
+                : new JsonArray(),
+            ["internalautodependencies"] = pkgData["internalautodependencies"] != null
+                ? JsonNode.Parse(pkgData["internalautodependencies"]!.ToJsonString(JsonWriteOptions))
+                : new JsonArray(),
+            ["ipaasDependencies"] = new JsonArray(),
             ["name"] = appName,
-            ["packageCode"] = pkgData["package_code"]?.ToString() ?? "",
-            ["sourceLineCount"] = sourceLineCount,
+            ["packageCode"] = "",
             ["statistics"] = new JsonObject
             {
-                ["blockCount"] = blockCount,
-                ["flowCount"] = flowCount,
-                ["magicBlockCount"] = magicBlockCount,
-                ["sourceLineCount"] = sourceLineCount
+                ["blockCount"] = 1,
+                ["flowCount"] = 1,
+                ["magicBlockCount"] = 0,
+                ["sourceLineCount"] = 0
             },
-            ["uiTags"] = pkgData["tags"]?.ToString() ?? "",
-            ["uiaType"] = pkgData["uia_type"]?.ToString() ?? "PC",
+            ["uiTags"] = "",
+            ["uiaType"] = "PC",
             ["videoUrl"] = ""
         };
 
@@ -194,7 +196,7 @@ public sealed class ShadowBotDeployer
             ["packageMd5"] = packageMd5
         };
 
-        request.Content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+        request.Content = new StringContent(payload.ToJsonString(JsonWriteOptions), Encoding.UTF8, "application/json");
 
         try
         {
@@ -239,7 +241,7 @@ public sealed class ShadowBotDeployer
             startTime = (now - TimeSpan.FromMinutes(2)).ToString("yyyy-MM-dd HH:mm:ss"),
             endTime = now.ToString("yyyy-MM-dd HH:mm:ss")
         };
-        request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        request.Content = new StringContent(JsonSerializer.Serialize(payload, JsonWriteOptions), Encoding.UTF8, "application/json");
 
         try
         {
@@ -266,7 +268,7 @@ public sealed class ShadowBotDeployer
             pageType = "1",
             sortBy = "4"
         };
-        request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        request.Content = new StringContent(JsonSerializer.Serialize(payload, JsonWriteOptions), Encoding.UTF8, "application/json");
 
         try
         {
