@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -27,6 +28,7 @@ public partial class MainWindow : FluentWindow
     private bool _isMigrating;
     private bool _isScanning;
     private bool _suppressUserChange;
+    private bool _isUpdatingSelection;
     private int _scanVersion;
     private string? _currentUserDir;
 
@@ -138,7 +140,10 @@ public partial class MainWindow : FluentWindow
             var apps = await Task.Run(() => Scanner.ScanLocalApps(userDir));
             if (scanVersion != _scanVersion) return;
 
+            UnbindAppEvents(_allApps);
             _allApps = apps;
+            BindAppEvents(_allApps);
+
             FilterApps();
             UpdateSelectedUserLabel(apps.Count);
             AppendLog($"已扫描到 {apps.Count} 个本地应用");
@@ -147,6 +152,7 @@ public partial class MainWindow : FluentWindow
         {
             if (scanVersion == _scanVersion)
             {
+                UnbindAppEvents(_allApps);
                 _allApps = [];
                 FilterApps();
                 AppendLog($"[ERROR] 扫描本地应用失败: {ex.Message}");
@@ -169,6 +175,31 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    private void BindAppEvents(IEnumerable<ShadowBotApp> apps)
+    {
+        foreach (var app in apps)
+        {
+            app.PropertyChanged += App_PropertyChanged;
+        }
+    }
+
+    private void UnbindAppEvents(IEnumerable<ShadowBotApp> apps)
+    {
+        foreach (var app in apps)
+        {
+            app.PropertyChanged -= App_PropertyChanged;
+        }
+    }
+
+    private void App_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ShadowBotApp.IsSelected))
+        {
+            if (_isUpdatingSelection) return;
+            Dispatcher.BeginInvoke(new Action(UpdateSelectionState));
+        }
+    }
+
     private void FilterApps()
     {
         var keyword = TxtSearch.Text?.Trim() ?? "";
@@ -180,15 +211,44 @@ public partial class MainWindow : FluentWindow
                 a.Name.Contains(keyword, StringComparison.OrdinalIgnoreCase) ||
                 a.Uuid.Contains(keyword, StringComparison.OrdinalIgnoreCase)).ToList();
 
-        foreach (var app in _filteredApps)
+        _isUpdatingSelection = true;
+        try
         {
-            app.IsSelected = selected.Contains(app.Uuid);
+            foreach (var app in _filteredApps)
+            {
+                app.IsSelected = selected.Contains(app.Uuid);
+            }
+        }
+        finally
+        {
+            _isUpdatingSelection = false;
         }
 
         GridApps.ItemsSource = null;
         GridApps.ItemsSource = _filteredApps;
 
-        ChkSelectAllHeader.IsChecked = _filteredApps.Count > 0 && _filteredApps.All(a => a.IsSelected);
+        UpdateSelectionState();
+    }
+
+    private void UpdateSelectionState()
+    {
+        if (_filteredApps.Count == 0)
+        {
+            ChkSelectAllHeader.IsChecked = false;
+        }
+        else if (_filteredApps.All(a => a.IsSelected))
+        {
+            ChkSelectAllHeader.IsChecked = true;
+        }
+        else if (_filteredApps.Any(a => a.IsSelected))
+        {
+            ChkSelectAllHeader.IsChecked = null;
+        }
+        else
+        {
+            ChkSelectAllHeader.IsChecked = false;
+        }
+
         UpdateSummary();
     }
 
@@ -219,14 +279,27 @@ public partial class MainWindow : FluentWindow
 
     // -------------------------------------------------------------- selection
 
+    private void ChkAppItem_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateSelectionState();
+    }
+
     private void ChkSelectAllHeader_Click(object sender, RoutedEventArgs e)
     {
         var check = ChkSelectAllHeader.IsChecked == true;
-        foreach (var app in _filteredApps)
+        _isUpdatingSelection = true;
+        try
         {
-            app.IsSelected = check;
+            foreach (var app in _filteredApps)
+            {
+                app.IsSelected = check;
+            }
         }
-        UpdateSummary();
+        finally
+        {
+            _isUpdatingSelection = false;
+        }
+        UpdateSelectionState();
     }
 
     private void BtnSelectAll_Click(object sender, RoutedEventArgs e)
@@ -237,12 +310,19 @@ public partial class MainWindow : FluentWindow
 
     private void BtnInvertSelection_Click(object sender, RoutedEventArgs e)
     {
-        foreach (var app in _filteredApps)
+        _isUpdatingSelection = true;
+        try
         {
-            app.IsSelected = !app.IsSelected;
+            foreach (var app in _filteredApps)
+            {
+                app.IsSelected = !app.IsSelected;
+            }
         }
-        ChkSelectAllHeader.IsChecked = null;
-        UpdateSummary();
+        finally
+        {
+            _isUpdatingSelection = false;
+        }
+        UpdateSelectionState();
     }
 
     private List<ShadowBotApp> GetSelectedApps() => _allApps.Where(a => a.IsSelected).ToList();
@@ -366,6 +446,49 @@ public partial class MainWindow : FluentWindow
         }
     }
 
+    private async void MenuItem_Publish_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isMigrating)
+        {
+            Dialogs.Warn("迁移任务正在进行中，无法发版应用。");
+            return;
+        }
+
+        var app = (sender as FrameworkElement)?.DataContext as ShadowBotApp ?? GridApps.SelectedItem as ShadowBotApp;
+        if (app == null) return;
+
+        var versionLog = Dialogs.Prompt("请输入发版更新说明:", "版本更新", $"应用发版 - {app.Name}");
+        if (versionLog == null) return;
+
+        if (string.IsNullOrWhiteSpace(versionLog))
+        {
+            versionLog = "版本更新";
+        }
+
+        AppendLog($"[INFO] 正在通过影刀客户端网关发版应用【{app.Name}】(UUID: {app.Uuid})...");
+        var (ok, msg) = await Task.Run(() => Scanner.PublishAppGateway(app.Uuid, versionLog.Trim()));
+
+        if (ok)
+        {
+            AppendLog($"[SUCCESS] 应用【{app.Name}】发版成功！{msg}");
+            Dialogs.Info($"应用【{app.Name}】已成功发版！\n影刀客户端已实时更新并同步状态。", "发版成功");
+            var userDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir ?? _currentUserDir;
+            if (!string.IsNullOrEmpty(userDir))
+            {
+                _ = RefreshAppsAsync(userDir);
+            }
+            else
+            {
+                FilterApps();
+            }
+        }
+        else
+        {
+            AppendLog($"[ERROR] 应用【{app.Name}】发版失败: {msg}");
+            Dialogs.Error(msg, "发版失败");
+        }
+    }
+
     private void MenuItem_Delete_Click(object sender, RoutedEventArgs e)
     {
         if (_isMigrating)
@@ -476,6 +599,71 @@ public partial class MainWindow : FluentWindow
         Dialogs.Info($"导出完成！成功导出 {success} 个应用包。", "完成");
     }
 
+    private async void BtnPublishSelected_Click(object sender, RoutedEventArgs e)
+    {
+        if (_isMigrating)
+        {
+            Dialogs.Warn("迁移任务正在进行中，无法发版应用。");
+            return;
+        }
+
+        var selectedApps = GetSelectedApps();
+        if (selectedApps.Count == 0)
+        {
+            Dialogs.Warn("请先在列表中勾选要发版选中的应用。");
+            return;
+        }
+
+        var versionLog = Dialogs.Prompt("请输入发版更新说明:", "版本更新", $"批量发版 ({selectedApps.Count} 个应用)");
+        if (versionLog == null) return;
+
+        if (string.IsNullOrWhiteSpace(versionLog))
+        {
+            versionLog = "版本更新";
+        }
+
+        var logText = versionLog.Trim();
+        AppendLog($"[INFO] 开始对选中的 {selectedApps.Count} 个应用执行本地影刀网关批量发版...");
+
+        var successCount = 0;
+        var failCount = 0;
+
+        await Task.Run(() =>
+        {
+            for (int i = 0; i < selectedApps.Count; i++)
+            {
+                var app = selectedApps[i];
+                Dispatcher.BeginInvoke(() => AppendLog($"[{i + 1}/{selectedApps.Count}] 正在发版: {app.Name} (UUID: {app.Uuid})..."));
+
+                var (ok, msg) = Scanner.PublishAppGateway(app.Uuid, logText);
+                if (ok)
+                {
+                    successCount++;
+                    Dispatcher.BeginInvoke(() => AppendLog($"[SUCCESS] 应用【{app.Name}】发版成功！"));
+                }
+                else
+                {
+                    failCount++;
+                    Dispatcher.BeginInvoke(() => AppendLog($"[ERROR] 应用【{app.Name}】发版失败: {msg}"));
+                }
+            }
+        });
+
+        var summary = $"批量发版完成：共 {selectedApps.Count} 个，成功 {successCount} 个，失败 {failCount} 个";
+        AppendLog($"[INFO] {summary}");
+        Dialogs.Info(summary, "批量发版完成");
+
+        var userDir = (CmbUsers.SelectedItem as ShadowBotUser)?.UserDir ?? _currentUserDir;
+        if (!string.IsNullOrEmpty(userDir))
+        {
+            _ = RefreshAppsAsync(userDir);
+        }
+        else
+        {
+            FilterApps();
+        }
+    }
+
     // ---------------------------------------------------------------- contacts
 
     private void CmbContacts_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -528,6 +716,7 @@ public partial class MainWindow : FluentWindow
 
         var addSuffix = ChkAddSuffix.IsChecked == true;
         var encryptPy = ChkEncryptPython.IsChecked == true;
+        var autoPublish = ChkAutoPublish.IsChecked == true;
 
         try
         {
@@ -570,6 +759,7 @@ public partial class MainWindow : FluentWindow
                     robotDir: app.RobotDir,
                     newAppName: migratedName,
                     encryptPython: encryptPy,
+                    autoPublish: autoPublish,
                     logCallback: message => Dispatcher.BeginInvoke(() => AppendLog(message))
                 ));
 

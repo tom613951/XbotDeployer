@@ -840,6 +840,61 @@ public static class Scanner
     }
 
     /// <summary>
+    /// 调用影刀客户端内建官方 API 网关 (端口 42500..42505) 进行应用发版
+    /// </summary>
+    public static (bool Success, string Message) PublishAppGateway(string appUuid, string updateLog = "版本更新")
+    {
+        for (int port = 42500; port <= 42505; port++)
+        {
+            try
+            {
+                using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+
+                // 探测健康状态
+                var healthResp = client.GetAsync($"http://127.0.0.1:{port}/api/v1/health").GetAwaiter().GetResult();
+                if (!healthResp.IsSuccessStatusCode) continue;
+
+                var publishUrl = $"http://127.0.0.1:{port}/api/v1/operator/app/publish";
+                using var req = new HttpRequestMessage(HttpMethod.Post, publishUrl);
+                var payload = new
+                {
+                    AppId = appUuid,
+                    UpdateLog = updateLog
+                };
+                req.Content = new StringContent(
+                    JsonSerializer.Serialize(payload, JsonWriteOptions),
+                    Encoding.UTF8,
+                    "application/json"
+                );
+
+                var resp = client.SendAsync(req).GetAwaiter().GetResult();
+                var resStr = resp.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+
+                if (resp.IsSuccessStatusCode)
+                {
+                    using var doc = JsonDocument.Parse(resStr);
+                    var root = doc.RootElement;
+                    var code = root.TryGetProperty("Code", out var cp) ? cp.GetInt32() : (root.TryGetProperty("code", out var c2) ? c2.GetInt32() : -1);
+                    var msg = root.TryGetProperty("Message", out var mp) ? mp.GetString() : (root.TryGetProperty("msg", out var m2) ? m2.GetString() : "ok");
+
+                    if (code == 0 || code == 200)
+                    {
+                        return (true, "应用已通过影刀客户端网关成功发版，影刀已实时同步！");
+                    }
+                    return (false, $"影刀网关发版返回错误 ({code}): {msg}");
+                }
+
+                return (false, $"影刀网关发版请求失败 (HTTP {resp.StatusCode}): {resStr}");
+            }
+            catch
+            {
+                // 探测下一个端口
+            }
+        }
+        return (false, "未检测到正在运行的影刀客户端 API 网关服务 (端口 42500..42505)，请确保影刀已启动");
+    }
+
+    /// <summary>
     /// 调用影刀客户端内建官方 API 网关 (端口 42500..42505) 彻底删除应用 (包含移入回收站并永久销毁)
     /// </summary>
     private static bool TryShadowBotGatewayDelete(string appUuid, string robotType)

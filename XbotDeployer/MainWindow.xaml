@@ -97,6 +97,11 @@
                                         <ui:SymbolIcon Symbol="Edit24" />
                                     </MenuItem.Icon>
                                 </MenuItem>
+                                <MenuItem Header="发版" Click="MenuItem_Publish_Click">
+                                    <MenuItem.Icon>
+                                        <ui:SymbolIcon Symbol="Send24" Foreground="{ui:ThemeResource SystemAccentColor}" />
+                                    </MenuItem.Icon>
+                                </MenuItem>
                                 <MenuItem Header="删除应用" Click="MenuItem_Delete_Click">
                                     <MenuItem.Icon>
                                         <ui:SymbolIcon Symbol="Delete24" Foreground="#E05555" />
@@ -191,7 +196,8 @@
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                                  HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0" Padding="0" />
+                                                  HorizontalAlignment="Left" VerticalAlignment="Center" Margin="0" Padding="0"
+                                                  Click="ChkAppItem_Click" />
                                     </DataTemplate>
                                 </DataGridTemplateColumn.CellTemplate>
                             </DataGridTemplateColumn>
@@ -208,13 +214,15 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
 
                         <ui:Button Grid.Column="0" Content="全选" Click="BtnSelectAll_Click" Margin="0,0,6,0" />
                         <ui:Button Grid.Column="1" Content="反选" Click="BtnInvertSelection_Click" Margin="0,0,6,0" />
-                        <ui:Button Grid.Column="3" Content="导出选中应用为 Zip 备份" Icon="{ui:SymbolIcon Symbol=FolderZip24}" Click="BtnExportZip_Click" />
+                        <ui:Button Grid.Column="2" Content="发版选中" Icon="{ui:SymbolIcon Symbol=Send24}" Click="BtnPublishSelected_Click" Margin="8,0,0,0" ToolTip="在本地影刀中一键发版选中的应用" />
+                        <ui:Button Grid.Column="4" Content="导出选中应用为 Zip 备份" Icon="{ui:SymbolIcon Symbol=FolderZip24}" Click="BtnExportZip_Click" />
                     </Grid>
                 </Grid>
             </Border>
@@ -277,6 +285,7 @@
                         BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                     <StackPanel>
                         <ui:TextBlock Text="迁移选项" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                        <CheckBox x:Name="ChkAutoPublish" Content="迁移后自动发版（确保接收端能实时更新）" IsChecked="True" Margin="0,0,0,8" />
                         <CheckBox x:Name="ChkAddSuffix" Content="追加接收时间戳后缀（防止同名覆盖）" IsChecked="True" Margin="0,0,0,4" />
                         <CheckBox x:Name="ChkEncryptPython" Content="编译 Python 源码为字节码 (.py -> .pyc)" IsChecked="False" />
                     </StackPanel>

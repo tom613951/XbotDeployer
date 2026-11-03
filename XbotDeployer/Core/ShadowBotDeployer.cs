@@ -296,11 +296,57 @@ public sealed class ShadowBotDeployer
         }
     }
 
+    public async Task<(bool Success, string Message)> PublishAppCloudAsync(
+        string targetToken,
+        string appId,
+        string versionLog = "版本更新")
+    {
+        var url = $"{_apiBaseUrl}/api/client/publish/publish";
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.TryAddWithoutValidation("Authorization", $"bearer {targetToken}");
+        request.Headers.TryAddWithoutValidation("Xybot-Client-RequestId", Guid.NewGuid().ToString());
+
+        var payload = new
+        {
+            appId,
+            versionLog
+        };
+        request.Content = new StringContent(JsonSerializer.Serialize(payload, JsonWriteOptions), Encoding.UTF8, "application/json");
+
+        try
+        {
+            var resp = await _httpClient.SendAsync(request);
+            var resStr = await resp.Content.ReadAsStringAsync();
+
+            if (resp.IsSuccessStatusCode)
+            {
+                var doc = JsonDocument.Parse(resStr);
+                var root = doc.RootElement;
+                var code = root.TryGetProperty("code", out var cp) ? cp.GetInt32() : 0;
+                var success = root.TryGetProperty("success", out var sp) && sp.GetBoolean();
+
+                if (code == 200 || success)
+                {
+                    return (true, "云端应用发版成功");
+                }
+                var msg = root.TryGetProperty("msg", out var mp) ? mp.GetString() : "发版失败";
+                return (false, $"云端应用发版失败: {msg}");
+            }
+
+            return (false, $"云端应用发版请求异常 (HTTP {resp.StatusCode}): {resStr}");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"云端应用发版网络异常: {ex.Message}");
+        }
+    }
+
     public async Task<(bool Success, string Message)> DeploySingleAppAsync(
         string targetToken,
         string robotDir,
         string? newAppName = null,
         bool encryptPython = false,
+        bool autoPublish = true,
         Action<string>? logCallback = null)
     {
         string? zipPath = null;
@@ -405,7 +451,22 @@ public sealed class ShadowBotDeployer
             // 6. Save develop time
             await SaveDevelopTimeAsync(targetToken, freshUuid);
 
-            // 7. Verify presence in cloud list
+            // 7. Auto publish if requested
+            if (autoPublish)
+            {
+                logCallback?.Invoke("[INFO] 正在为目标账号下的新应用执行自动发版...");
+                var (pubOk, pubMsg) = await PublishAppCloudAsync(targetToken, freshUuid, "迁移自动发版");
+                if (pubOk)
+                {
+                    logCallback?.Invoke("[SUCCESS] 目标云端应用发版成功，接收端已支持实时运行与更新。");
+                }
+                else
+                {
+                    logCallback?.Invoke($"[WARN] 目标云端应用自动发版未完成 ({pubMsg})，不影响应用工程本身。");
+                }
+            }
+
+            // 8. Verify presence in cloud list
             await Task.Delay(500);
             var verified = await VerifyAppInTargetListAsync(targetToken, freshUuid);
             if (verified)
