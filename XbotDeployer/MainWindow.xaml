@@ -285,7 +285,7 @@
                         BorderBrush="{ui:ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1">
                     <StackPanel>
                         <ui:TextBlock Text="迁移选项" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
-                        <CheckBox x:Name="ChkAutoPublish" Content="迁移后自动发版（确保接收端能实时更新）" IsChecked="True" Margin="0,0,0,8" />
+                        <CheckBox x:Name="ChkAutoPublish" Content="迁移后自动发版" IsChecked="True" Margin="0,0,0,8" />
                         <CheckBox x:Name="ChkAddSuffix" Content="追加接收时间戳后缀（防止同名覆盖）" IsChecked="True" Margin="0,0,0,4" />
                         <CheckBox x:Name="ChkEncryptPython" Content="编译 Python 源码为字节码 (.py -> .pyc)" IsChecked="False" />
                     </StackPanel>
